@@ -25,16 +25,16 @@
 
 ### One-Command Install (Recommended)
 ```bash
-omarchy plugin add https://github.com/giogio/jot.git --enable
+omarchy plugin add https://github.com/JoeJoeflyn/jot.git --enable
 ```
-*(or `omarchy plugin install https://github.com/giogio/jot.git --enable`)*
+*(or `omarchy plugin install https://github.com/JoeJoeflyn/jot.git --enable`)*
 
 ---
 
 ### Manual Installation
 Clone this repository into your Omarchy plugins directory:
 ```bash
-git clone https://github.com/giogio/jot.git ~/.config/omarchy/plugins/jot
+git clone https://github.com/JoeJoeflyn/jot.git ~/.config/omarchy/plugins/jot
 ```
 
 Add `"jot"` to your `~/.config/omarchy/shell.json` configuration:

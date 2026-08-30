@@ -3,10 +3,10 @@
   "id": "jot",
   "name": "Jot",
   "version": "1.0.0",
-  "author": "giogio",
+  "author": "JoeJoeflyn",
   "license": "MIT",
   "description": "Minimalist sticky notes living seamlessly at the edge of your screen. Hover to fan out, click to write, drag to reorder, with instant search and archive manager.",
-  "repository": "https://github.com/giogio/jot",
+  "repository": "https://github.com/JoeJoeflyn/jot",
   "kinds": [
     "panel",
     "bar-widget"
