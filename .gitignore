@@ -1,0 +1,17 @@
+# Local SQLite data (user notes are stored in ~/.local/share/jot/)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Backups and temporary files
+*~
+*.swp
+*.swo
+.DS_Store
+.directory
+__pycache__/
+*.pyc
+
+# Local test scratchpads
+scratch/

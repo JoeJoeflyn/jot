@@ -1,0 +1,863 @@
+import QtQuick
+import QtQuick.Controls
+import qs.Commons
+import qs.Ui
+import "NotyModel.js" as Model
+
+// NotyManager — All Notes & Archive Library Window.
+// Faithful port of aimen08/noty Sources/LibraryWindow.swift:
+//   - Segmented mode: All Notes vs Archive
+//   - Live search across titles and note bodies
+//   - Left sidebar with colored dashes, timestamps, task counts, preview
+//   - Right detail pane with paper styling, live editing, and task checkbox support
+Item {
+  id: mgrRoot
+
+  property bool open: false
+  property string mode: "all" // "all" | "archive"
+  property string searchQuery: ""
+  property int selectedNoteId: -1
+  property var notesList: []
+  property string fontFamily: ""
+  property real fontSize: 13.5
+
+  signal closeRequested()
+  signal newNoteRequested()
+  signal saveRequested(int id, string title, string body)
+  signal colorChanged(int id, int colorIndex)
+  signal pinToggled(int id)
+  signal archiveToggled(int id, bool toArchived)
+  signal deleteRequested(int id)
+
+  visible: open
+  opacity: open ? 1.0 : 0.0
+  Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+
+  // Filtered notes list based on mode and searchQuery
+  readonly property var filteredNotes: {
+    var list = Array.isArray(notesList) ? notesList : []
+    var isArch = (mode === "archive")
+    var q = searchQuery.trim().toLowerCase()
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i]
+      if (isArch ? (n.archived === 1) : (n.archived === 0)) {
+        if (q === "") {
+          out.push(n)
+        } else {
+          var t = String(n.title || "").toLowerCase()
+          var b = String(n.body || "").toLowerCase()
+          if (t.indexOf(q) !== -1 || b.indexOf(q) !== -1) {
+            out.push(n)
+          }
+        }
+      }
+    }
+    return out
+  }
+
+  readonly property var selectedNote: {
+    if (selectedNoteId < 0) return null
+    for (var i = 0; i < filteredNotes.length; i++) {
+      if (filteredNotes[i].id === selectedNoteId) return filteredNotes[i]
+    }
+    return filteredNotes.length > 0 ? filteredNotes[0] : null
+  }
+
+  onFilteredNotesChanged: {
+    if (filteredNotes.length > 0) {
+      var found = false
+      for (var i = 0; i < filteredNotes.length; i++) {
+        if (filteredNotes[i].id === selectedNoteId) { found = true; break }
+      }
+      if (!found) selectedNoteId = filteredNotes[0].id
+    } else {
+      selectedNoteId = -1
+    }
+  }
+
+  function show(initialMode) {
+    mode = initialMode || "all"
+    searchQuery = ""
+    open = true
+    if (filteredNotes.length > 0) selectedNoteId = filteredNotes[0].id
+  }
+
+  function close() {
+    open = false
+    detailEditor.flush()
+    closeRequested()
+  }
+
+  // Dismiss on click outside modal card
+  MouseArea {
+    anchors.fill: parent
+    onClicked: mgrRoot.close()
+    Keys.onEscapePressed: mgrRoot.close()
+  }
+
+  // Centered Modal Window Card
+  Rectangle {
+    id: card
+    anchors.centerIn: parent
+    width: Math.min(parent.width - 40, 760)
+    height: Math.min(parent.height - 40, 520)
+    radius: 12
+    color: Color.menu.background || Qt.rgba(0.12, 0.12, 0.14, 0.98)
+    border.color: Color.menu.border || Qt.rgba(1, 1, 1, 0.12)
+    border.width: 1
+
+    // Drop shadow
+    Rectangle {
+      anchors.fill: parent
+      anchors.margins: -1
+      z: -1
+      radius: parent.radius + 1
+      color: "transparent"
+      border.color: Qt.rgba(0, 0, 0, 0.45)
+      border.width: 3
+    }
+
+    // Swallow clicks inside the card
+    MouseArea {
+      anchors.fill: parent
+    }
+
+    Column {
+      anchors.fill: parent
+      spacing: 0
+
+      // TOP BAR: Segmented Mode + Search + New Note + Close
+      Rectangle {
+        width: parent.width
+        height: 48
+        color: Qt.rgba(1, 1, 1, 0.03)
+        radius: 12
+
+        // Square bottom corners
+        Rectangle {
+          anchors.bottom: parent.bottom
+          anchors.left: parent.left
+          anchors.right: parent.right
+          height: 12
+          color: parent.color
+        }
+
+        Row {
+          anchors.fill: parent
+          anchors.leftMargin: 14
+          anchors.rightMargin: 14
+          spacing: 12
+
+          // Segmented Switcher: All Notes | Archive
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: 180
+            height: 28
+            radius: 7
+            color: Qt.rgba(0, 0, 0, 0.35)
+            border.color: Qt.rgba(1, 1, 1, 0.08)
+            border.width: 0.5
+
+            Row {
+              anchors.fill: parent
+              anchors.margins: 2
+              spacing: 2
+
+              // "All Notes" segment
+              Rectangle {
+                width: (parent.width - 2) / 2
+                height: parent.height
+                radius: 5
+                color: mgrRoot.mode === "all" ? Qt.rgba(1, 1, 1, 0.18) : "transparent"
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "All Notes"
+                  color: mgrRoot.mode === "all" ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.6)
+                  font.family: Style.font.family
+                  font.pixelSize: 11
+                  font.bold: mgrRoot.mode === "all"
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: mgrRoot.mode = "all"
+                }
+              }
+
+              // "Archive" segment
+              Rectangle {
+                width: (parent.width - 2) / 2
+                height: parent.height
+                radius: 5
+                color: mgrRoot.mode === "archive" ? Qt.rgba(1, 1, 1, 0.18) : "transparent"
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "Archive"
+                  color: mgrRoot.mode === "archive" ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.6)
+                  font.family: Style.font.family
+                  font.pixelSize: 11
+                  font.bold: mgrRoot.mode === "archive"
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: mgrRoot.mode = "archive"
+                }
+              }
+            }
+          }
+
+          // Search Field
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: 220
+            height: 28
+            radius: 7
+            color: Qt.rgba(1, 1, 1, 0.06)
+            border.color: Qt.rgba(1, 1, 1, 0.08)
+            border.width: 0.5
+
+            Row {
+              anchors.fill: parent
+              anchors.leftMargin: 8
+              anchors.rightMargin: 8
+              spacing: 6
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "⌕"
+                font.pixelSize: 13
+                font.bold: true
+                color: Qt.rgba(1, 1, 1, 0.55)
+              }
+
+              TextField {
+                id: searchInput
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - 40
+                placeholderText: "Search notes…"
+                color: "#FFFFFF"
+                font.family: Style.font.family
+                font.pixelSize: 12
+                background: Rectangle { color: "transparent" }
+                onTextChanged: mgrRoot.searchQuery = text
+              }
+
+              Text {
+                visible: searchInput.text !== ""
+                anchors.verticalCenter: parent.verticalCenter
+                text: "✕"
+                font.pixelSize: 10
+                color: Qt.rgba(1, 1, 1, 0.50)
+                MouseArea {
+                  anchors.fill: parent
+                  anchors.margins: -4
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: searchInput.text = ""
+                }
+              }
+            }
+          }
+
+          // Flexible space
+          Item {
+            width: Math.max(10, parent.width - 180 - 220 - newNoteBtn.width - closeBtn.width - parent.spacing * 4 - parent.leftPadding - parent.rightPadding)
+            height: 1
+          }
+
+          // New Note Button
+          Rectangle {
+            id: newNoteBtn
+            anchors.verticalCenter: parent.verticalCenter
+            width: newNoteLabel.implicitWidth + 18
+            height: 28
+            radius: 6
+            color: newNoteMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : Qt.rgba(1, 1, 1, 0.08)
+
+            Row {
+              anchors.centerIn: parent
+              spacing: 4
+
+              Text {
+                text: "+"
+                color: "#FFFFFF"
+                font.family: Style.font.family
+                font.pixelSize: 13
+                font.bold: true
+              }
+
+              Text {
+                id: newNoteLabel
+                text: "New Note"
+                color: "#FFFFFF"
+                font.family: Style.font.family
+                font.pixelSize: 12
+                font.bold: true
+              }
+            }
+
+            MouseArea {
+              id: newNoteMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: mgrRoot.newNoteRequested()
+            }
+          }
+
+          // Close Button
+          Rectangle {
+            id: closeBtn
+            anchors.verticalCenter: parent.verticalCenter
+            width: 28
+            height: 28
+            radius: 6
+            color: closeMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+
+            Text {
+              anchors.centerIn: parent
+              text: "✕"
+              color: Qt.rgba(1, 1, 1, 0.70)
+              font.pixelSize: 12
+            }
+
+            MouseArea {
+              id: closeMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: mgrRoot.close()
+            }
+          }
+        }
+      }
+
+      // Horizontal Divider
+      Rectangle {
+        width: parent.width
+        height: 1
+        color: Qt.rgba(1, 1, 1, 0.08)
+      }
+
+      // TWO-PANE BODY: Left Sidebar + Right Detail
+      Row {
+        width: parent.width
+        height: parent.height - 49
+        spacing: 0
+
+        // LEFT SIDEBAR (Notes List)
+        Column {
+          width: 260
+          height: parent.height
+          spacing: 0
+
+          ListView {
+            id: listView
+            width: parent.width
+            height: parent.height - 28
+            clip: true
+            model: mgrRoot.filteredNotes
+
+            delegate: Rectangle {
+              id: noteRow
+              width: listView.width
+              height: 52
+              color: mgrRoot.selectedNoteId === modelData.id
+                ? Qt.rgba(1, 1, 1, 0.12)
+                : (rowHover.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+
+              readonly property var pal: Model.colorByIndex(modelData.color)
+              readonly property var counts: Model.taskCounts(modelData.body)
+
+              Row {
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                spacing: 10
+
+                // Colored Dash (width 3.5, height 32)
+                Rectangle {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: 3.5
+                  height: 32
+                  radius: 2
+                  color: noteRow.pal.dash
+                }
+
+                // Text info
+                Column {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - 24
+                  spacing: 2
+
+                  // Title
+                  Text {
+                    text: Model.displayTitle(modelData)
+                    color: "#FFFFFF"
+                    font.family: Style.font.family
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                    width: parent.width
+                  }
+
+                  // Subtitle: Time + Task count + Snippet
+                  Row {
+                    width: parent.width
+                    spacing: 6
+
+                    Text {
+                      text: Model.ago(modelData.updated_at)
+                      color: Qt.rgba(1, 1, 1, 0.45)
+                      font.family: Style.font.family
+                      font.pixelSize: 10
+                    }
+
+                    // Task badge
+                    Rectangle {
+                      visible: noteRow.counts.total > 0
+                      width: taskCountLabel.implicitWidth + 8
+                      height: 14
+                      radius: 4
+                      color: noteRow.counts.done === noteRow.counts.total
+                        ? Qt.rgba(0.2, 0.8, 0.4, 0.25)
+                        : Qt.rgba(1, 1, 1, 0.10)
+
+                      Text {
+                        id: taskCountLabel
+                        anchors.centerIn: parent
+                        text: (noteRow.counts.done === noteRow.counts.total ? "✓ " : "") +
+                              noteRow.counts.done + "/" + noteRow.counts.total
+                        color: noteRow.counts.done === noteRow.counts.total ? "#68D391" : Qt.rgba(1, 1, 1, 0.65)
+                        font.family: Style.font.family
+                        font.pixelSize: 9
+                        font.bold: true
+                      }
+                    }
+
+                    // Preview Snippet
+                    Text {
+                      visible: text !== ""
+                      text: Model.notePreview(modelData.body)
+                      color: Qt.rgba(1, 1, 1, 0.35)
+                      font.family: Style.font.family
+                      font.pixelSize: 10
+                      elide: Text.ElideRight
+                      width: parent.width - 100
+                    }
+                  }
+                }
+              }
+
+              MouseArea {
+                id: rowHover
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: mgrRoot.selectedNoteId = modelData.id
+              }
+            }
+          }
+
+          // Sidebar Footer: Count Badge
+          Rectangle {
+            width: parent.width
+            height: 28
+            color: Qt.rgba(1, 1, 1, 0.02)
+
+            Text {
+              anchors.centerIn: parent
+              text: mgrRoot.filteredNotes.length + " " + (mgrRoot.filteredNotes.length === 1 ? "note" : "notes")
+              color: Qt.rgba(1, 1, 1, 0.40)
+              font.family: Style.font.family
+              font.pixelSize: 11
+            }
+          }
+        }
+
+        // Vertical Divider
+        Rectangle {
+          width: 1
+          height: parent.height
+          color: Qt.rgba(1, 1, 1, 0.08)
+        }
+
+        // RIGHT DETAIL PANE
+        Item {
+          id: detailPane
+          width: parent.width - 261
+          height: parent.height
+
+          // Empty state when no note selected
+          Item {
+            visible: mgrRoot.selectedNote === null
+            anchors.fill: parent
+
+            Column {
+              anchors.centerIn: parent
+              spacing: 8
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "≡"
+                font.pixelSize: 32
+                color: Qt.rgba(1, 1, 1, 0.25)
+              }
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: mgrRoot.filteredNotes.length === 0 ? "No notes found" : "Select a note"
+                color: Qt.rgba(1, 1, 1, 0.45)
+                font.family: Style.font.family
+                font.pixelSize: 13
+              }
+            }
+          }
+
+          // Note Detail Editor
+          Item {
+            id: detailContainer
+            visible: mgrRoot.selectedNote !== null
+            anchors.fill: parent
+
+            readonly property var curPal: mgrRoot.selectedNote ? Model.colorByIndex(mgrRoot.selectedNote.color) : Model.COLORS[0]
+
+            // Paper Background matching note's color
+            Rectangle {
+              anchors.fill: parent
+              color: detailContainer.curPal.paper
+            }
+
+            Column {
+              anchors.fill: parent
+              spacing: 0
+
+              // Detail Header Bar
+              Rectangle {
+                width: parent.width
+                height: 38
+                color: Qt.rgba(
+                  parseInt(detailContainer.curPal.dash.substring(1,3), 16)/255,
+                  parseInt(detailContainer.curPal.dash.substring(3,5), 16)/255,
+                  parseInt(detailContainer.curPal.dash.substring(5,7), 16)/255, 0.15)
+
+                Row {
+                  anchors.fill: parent
+                  anchors.leftMargin: 14
+                  anchors.rightMargin: 14
+                  spacing: 8
+
+                  // 8 Color Swatches
+                  Repeater {
+                    model: Model.COLORS
+                    delegate: Item {
+                      width: 14
+                      height: 38
+                      anchors.verticalCenter: parent.verticalCenter
+
+                      Rectangle {
+                        anchors.centerIn: parent
+                        width: 10
+                        height: 10
+                        radius: 5
+                        color: modelData.dash
+
+                        // Active Ring
+                        Rectangle {
+                          anchors.fill: parent
+                          anchors.margins: -2
+                          radius: width / 2
+                          color: "transparent"
+                          border.color: mgrRoot.selectedNote && mgrRoot.selectedNote.color === index
+                            ? detailContainer.curPal.ink
+                            : "transparent"
+                          border.width: 1.5
+                        }
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                          if (mgrRoot.selectedNote) {
+                            mgrRoot.colorChanged(mgrRoot.selectedNote.id, index)
+                          }
+                        }
+                      }
+                    }
+                  }
+
+                  // Spacer
+                  Item {
+                    width: Math.max(10, parent.width - (14 * 8 + 8 * 7) - 240)
+                    height: 1
+                  }
+
+                  // Edited timestamp
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Edited " + Model.ago(mgrRoot.selectedNote ? mgrRoot.selectedNote.updated_at : 0)
+                    color: Qt.rgba(
+                      parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.55)
+                    font.family: Style.font.family
+                    font.pixelSize: 11
+                  }
+
+                  // Pin/Unpin button
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 24
+                    height: 22
+                    radius: 5
+                    color: Qt.rgba(
+                      parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.08)
+
+                    Canvas {
+                      anchors.centerIn: parent
+                      width: 14
+                      height: 14
+                      renderTarget: Canvas.FramebufferObject
+                      onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.reset()
+                        var ink = detailContainer.curPal.ink
+                        var isPinned = mgrRoot.selectedNote && mgrRoot.selectedNote.pinned === 1
+                        ctx.strokeStyle = Qt.rgba(
+                          parseInt(ink.substring(1,3), 16)/255,
+                          parseInt(ink.substring(3,5), 16)/255,
+                          parseInt(ink.substring(5,7), 16)/255, isPinned ? 0.95 : 0.60)
+                        ctx.fillStyle = ctx.strokeStyle
+                        ctx.lineWidth = 1.3
+                        ctx.lineCap = "round"
+                        if (isPinned) {
+                          ctx.beginPath()
+                          ctx.arc(7, 4.5, 3, 0, Math.PI * 2)
+                          ctx.fill()
+                          ctx.beginPath()
+                          ctx.moveTo(7, 7.5)
+                          ctx.lineTo(7, 13)
+                          ctx.stroke()
+                        } else {
+                          ctx.beginPath()
+                          ctx.arc(7, 4.5, 2.8, 0, Math.PI * 2)
+                          ctx.stroke()
+                          ctx.beginPath()
+                          ctx.moveTo(7, 7.5)
+                          ctx.lineTo(7, 13)
+                          ctx.stroke()
+                        }
+                      }
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        if (mgrRoot.selectedNote) mgrRoot.pinToggled(mgrRoot.selectedNote.id)
+                      }
+                    }
+                  }
+
+                  // Archive / Restore button
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: archLabel.implicitWidth + 14
+                    height: 22
+                    radius: 5
+                    color: Qt.rgba(
+                      parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.08)
+
+                    Text {
+                      id: archLabel
+                      anchors.centerIn: parent
+                      text: mgrRoot.selectedNote && mgrRoot.selectedNote.archived === 1 ? "Restore" : "Archive"
+                      color: detailContainer.curPal.ink
+                      font.family: Style.font.family
+                      font.pixelSize: 11
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        if (mgrRoot.selectedNote) {
+                          mgrRoot.archiveToggled(mgrRoot.selectedNote.id, mgrRoot.selectedNote.archived === 0)
+                        }
+                      }
+                    }
+                  }
+
+                  // Delete button
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 24
+                    height: 22
+                    radius: 5
+                    color: Qt.rgba(
+                      parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.08)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "✕"
+                      font.pixelSize: 11
+                      font.bold: true
+                      color: detailContainer.curPal ? detailContainer.curPal.ink : "#222222"
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        if (mgrRoot.selectedNote) mgrRoot.deleteRequested(mgrRoot.selectedNote.id)
+                      }
+                    }
+                  }
+                }
+              }
+
+              // Note Text Area
+              ScrollView {
+                id: detailScroll
+                width: parent.width
+                height: parent.height - 38
+                clip: true
+
+                TextArea {
+                  id: detailTextArea
+                  color: detailContainer.curPal.ink
+                  font.family: mgrRoot.fontFamily !== "" ? mgrRoot.fontFamily : Style.font.family
+                  font.pixelSize: mgrRoot.fontSize
+                  wrapMode: TextArea.Wrap
+                  textFormat: TextArea.PlainText
+                  selectByMouse: true
+                  leftPadding: 16
+                  rightPadding: 16
+                  topPadding: 12
+                  bottomPadding: 12
+                  background: Rectangle { color: "transparent" }
+
+                  text: mgrRoot.selectedNote ? (mgrRoot.selectedNote.body || "") : ""
+
+                  onTextChanged: {
+                    if (mgrRoot.selectedNote && mgrRoot.selectedNote.id >= 0) {
+                      mgrAutosaveTimer.restart()
+                    }
+                  }
+
+                  // Task Checkbox Clicking
+                  MouseArea {
+                    anchors.fill: parent
+                    propagateComposedEvents: true
+                    acceptedButtons: Qt.LeftButton
+                    onClicked: function(mouse) {
+                      var pos = detailTextArea.positionAt(mouse.x, mouse.y)
+                      var text = detailTextArea.text
+                      var lineStart = text.lastIndexOf("\n", Math.max(0, pos - 1)) + 1
+                      var lineEnd = text.indexOf("\n", pos)
+                      if (lineEnd === -1) lineEnd = text.length
+                      var line = text.substring(lineStart, lineEnd)
+
+                      if (Model.isTaskLine(line) && pos <= lineStart + 3) {
+                        var toggled = Model.toggleTaskLine(line)
+                        var next = text.substring(0, lineStart) + toggled + text.substring(lineEnd)
+                        detailTextArea.text = next
+                        detailTextArea.cursorPosition = pos
+                        mgrAutosaveTimer.restart()
+                        mouse.accepted = true
+                        return
+                      }
+                      mouse.accepted = false
+                    }
+                  }
+
+                  // Enter task continuation and shortcuts
+                  Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                      if (!(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier))) {
+                        var full = detailTextArea.text
+                        var cur = detailTextArea.cursorPosition
+                        var lineStart = full.lastIndexOf("\n", Math.max(0, cur - 1)) + 1
+                        var lineEnd = full.indexOf("\n", cur)
+                        if (lineEnd === -1) lineEnd = full.length
+                        var line = full.substring(lineStart, lineEnd)
+
+                        if (Model.isTaskLine(line)) {
+                          if (Model.stripTask(line).trim() === "") {
+                            var cleared = full.substring(0, lineStart) + full.substring(lineEnd)
+                            detailTextArea.text = cleared
+                            detailTextArea.cursorPosition = lineStart
+                            mgrAutosaveTimer.restart()
+                            event.accepted = true
+                            return
+                          }
+                          var insert = "\n" + Model.TASK_OPEN_PREFIX
+                          var next = full.substring(0, cur) + insert + full.substring(cur)
+                          detailTextArea.text = next
+                          detailTextArea.cursorPosition = cur + insert.length
+                          mgrAutosaveTimer.restart()
+                          event.accepted = true
+                          return
+                        }
+                      }
+                    }
+
+                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_T) {
+                      var full = detailTextArea.text
+                      var cur = detailTextArea.cursorPosition
+                      var lineStart = full.lastIndexOf("\n", Math.max(0, cur - 1)) + 1
+                      var lineEnd = full.indexOf("\n", cur)
+                      if (lineEnd === -1) lineEnd = full.length
+                      var line = full.substring(lineStart, lineEnd)
+                      var toggled = Model.toggleTaskLine(line)
+                      var next = full.substring(0, lineStart) + toggled + full.substring(lineEnd)
+                      detailTextArea.text = next
+                      detailTextArea.cursorPosition = Math.min(next.length, cur + (toggled.length - line.length))
+                      mgrAutosaveTimer.restart()
+                      event.accepted = true
+                      return
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  QtObject {
+    id: detailEditor
+    function flush() {
+      mgrAutosaveTimer.stop()
+      if (mgrRoot.selectedNote && mgrRoot.selectedNote.id >= 0 && detailTextArea) {
+        var tit = Model.derivedTitle(detailTextArea.text)
+        mgrRoot.saveRequested(mgrRoot.selectedNote.id, tit, detailTextArea.text)
+      }
+    }
+  }
+
+  Timer {
+    id: mgrAutosaveTimer
+    interval: 250
+    onTriggered: {
+      if (mgrRoot.selectedNote && mgrRoot.selectedNote.id >= 0 && detailTextArea) {
+        var tit = Model.derivedTitle(detailTextArea.text)
+        mgrRoot.saveRequested(mgrRoot.selectedNote.id, tit, detailTextArea.text)
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "jot",
+  "name": "Jot",
+  "version": "1.0.0",
+  "author": "giogio",
+  "license": "MIT",
+  "description": "Minimalist sticky notes living seamlessly at the edge of your screen. Hover to fan out, click to write, drag to reorder, with instant search and archive manager.",
+  "repository": "https://github.com/giogio/jot",
+  "kinds": [
+    "panel",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Noty.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Jot Notes",
+    "description": "Sticky notes deck toggle button",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
