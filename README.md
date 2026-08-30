@@ -23,10 +23,13 @@
 
 ## 🚀 Installation
 
-### Via Omarchy Plugin Manager
+### One-Command Install (Recommended)
 ```bash
-omarchy plugin add jot
+omarchy plugin add https://github.com/giogio/jot.git --enable
 ```
+*(or `omarchy plugin install https://github.com/giogio/jot.git --enable`)*
+
+---
 
 ### Manual Installation
 Clone this repository into your Omarchy plugins directory:
