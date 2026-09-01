@@ -53,6 +53,9 @@ Item {
   property var activeScreen: null
   property int revealTick: 0
 
+  // Emitted before collapsing so the active editor can flush pending edits
+  signal flushEditorRequested()
+
   // Window modals
   property bool managerOpen: false
   property string managerInitialMode: "all"
@@ -204,6 +207,7 @@ Item {
   }
 
   function collapseToFan() {
+    root.flushEditorRequested()
     root.activeNoteId = -1
     root.deckState = "fan"
     fanIdleTimer.restart()
@@ -212,6 +216,7 @@ Item {
   }
 
   function collapseToRest() {
+    root.flushEditorRequested()
     root.deckState = "rest"
     root.activeNoteId = -1
     root.showAllTabs = false
@@ -919,6 +924,7 @@ Item {
               onRight: root.onRight
               fontFamily: root.noteFont
               fontSize: root.noteFontSize
+              rootPanel: root
 
               onSaveRequested: function(id, tit, body) {
                 root.saveNote(id, tit, body)

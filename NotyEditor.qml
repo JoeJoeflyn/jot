@@ -18,6 +18,8 @@ Item {
   property string findQuery: ""
   property int findMatchCount: 0
   property int findCurrentIndex: -1
+  property var rootPanel: null
+  property int loadedNoteId: -1
 
   signal saveRequested(int id, string title, string body)
   signal colorChanged(int id, int colorIndex)
@@ -315,8 +317,6 @@ Item {
           bottomPadding: 6
           background: Rectangle { color: "transparent" }
 
-          text: editorRoot.note ? (editorRoot.note.body || "") : ""
-
           onTextChanged: {
             if (editorRoot.note && editorRoot.note.id >= 0 && text !== (editorRoot.note.body || "")) {
               autosaveTimer.restart()
@@ -391,11 +391,26 @@ Item {
               }
             }
 
-            // Ctrl+T: Toggle task checkbox on current line
+            // Ctrl+T: Toggle task checkbox on current line (or selection)
             if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_T) {
               editorRoot.toggleCurrentLineTask()
               event.accepted = true
               return
+            }
+
+            // Ctrl+V: Convert markdown task syntax from pasted content
+            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
+              Qt.callLater(function() {
+                var after = noteTextArea.text
+                var converted = Model.tasksFromMarkdown(after)
+                if (converted !== after) {
+                  var curPos = noteTextArea.cursorPosition
+                  var newCursor = Model.tasksFromMarkdown(after.substring(0, curPos)).length
+                  noteTextArea.text = converted
+                  noteTextArea.cursorPosition = newCursor
+                  autosaveTimer.restart()
+                }
+              })
             }
 
             // Ctrl+F: Toggle find
@@ -605,8 +620,15 @@ Item {
     return str
   }
 
+  // Root emits this before collapsing so we flush pending edits to SQLite
+  Connections {
+    target: editorRoot.rootPanel
+    function onFlushEditorRequested() { editorRoot.flushAutosave() }
+  }
+
   onNoteChanged: {
-    if (note && noteTextArea) {
+    if (note && noteTextArea && note.id !== loadedNoteId) {
+      loadedNoteId = note.id
       var nb = normalizeBody(note.body)
       if (noteTextArea.text !== nb) {
         noteTextArea.text = nb
@@ -616,6 +638,7 @@ Item {
 
   Component.onCompleted: {
     if (note && noteTextArea) {
+      loadedNoteId = note.id
       noteTextArea.text = normalizeBody(note.body)
     }
   }
@@ -623,6 +646,7 @@ Item {
   function loadNote(n) {
     if (!n) return
     note = n
+    loadedNoteId = n.id
     var nb = normalizeBody(n.body)
     if (noteTextArea.text !== nb) {
       noteTextArea.text = nb
@@ -664,14 +688,32 @@ Item {
 
   function toggleCurrentLineTask() {
     var full = noteTextArea.text
+    var selStart = noteTextArea.selectionStart
+    var selEnd = noteTextArea.selectionEnd
+
+    // Multi-line selection: toggle all lines in the selection
+    if (selEnd > selStart) {
+      var lineStart = full.lastIndexOf("\n", Math.max(0, selStart - 1)) + 1
+      var lineEnd = full.indexOf("\n", selEnd)
+      if (lineEnd === -1) lineEnd = full.length
+      var block = full.substring(lineStart, lineEnd)
+      var newBlock = Model.toggleTaskBlock(block)
+      var next = full.substring(0, lineStart) + newBlock + full.substring(lineEnd)
+      noteTextArea.text = next
+      noteTextArea.select(lineStart, lineStart + newBlock.length)
+      autosaveTimer.restart()
+      return
+    }
+
+    // Single line (cursor only)
     var cur = noteTextArea.cursorPosition
-    var lineStart = full.lastIndexOf("\n", Math.max(0, cur - 1)) + 1
-    var lineEnd = full.indexOf("\n", cur)
-    if (lineEnd === -1) lineEnd = full.length
-    var line = full.substring(lineStart, lineEnd)
+    var ls = full.lastIndexOf("\n", Math.max(0, cur - 1)) + 1
+    var le = full.indexOf("\n", cur)
+    if (le === -1) le = full.length
+    var line = full.substring(ls, le)
 
     var toggled = Model.toggleTaskLine(line)
-    var next = full.substring(0, lineStart) + toggled + full.substring(lineEnd)
+    var next = full.substring(0, ls) + toggled + full.substring(le)
     noteTextArea.text = next
     noteTextArea.cursorPosition = Math.min(next.length, cur + (toggled.length - line.length))
     autosaveTimer.restart()

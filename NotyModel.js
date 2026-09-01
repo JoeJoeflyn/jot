@@ -150,6 +150,28 @@ function stripTask(line) {
   return String(line).replace(/^(\s*)(\[[✓xXvV ]\]|\u2610\uFE0E?|\u2611\uFE0E?|[-*]\s+\[[ xX]\])\s*/, "");
 }
 
+// Toggle tasks across a multi-line block (for selection-based Ctrl+T).
+// If any non-empty line is not yet a task, convert all non-task lines to open tasks.
+// If all non-empty lines are already tasks, toggle each (open↔done).
+function toggleTaskBlock(text) {
+  var lines = String(text || "").split("\n");
+  var anyNonTask = false;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].trim() !== "" && !isTaskLine(lines[i])) { anyNonTask = true; break; }
+  }
+  var out = [];
+  for (var j = 0; j < lines.length; j++) {
+    var l = lines[j];
+    if (l.trim() === "") { out.push(l); continue; }
+    if (anyNonTask) {
+      out.push(isTaskLine(l) ? l : (TASK_OPEN_PREFIX + l));
+    } else {
+      out.push(toggleTaskLine(l));
+    }
+  }
+  return out.join("\n");
+}
+
 function taskCounts(body) {
   var lines = String(body || "").split("\n");
   var done = 0, total = 0;
@@ -404,6 +426,7 @@ if (typeof module !== "undefined" && module.exports) {
     taskMarker: taskMarker,
     isTaskLine: isTaskLine,
     toggleTaskLine: toggleTaskLine,
+    toggleTaskBlock: toggleTaskBlock,
     stripTask: stripTask,
     taskCounts: taskCounts,
     derivedTitle: derivedTitle,
@@ -453,6 +476,23 @@ if (typeof require === "function" && require.main === module) {
   assert.strictEqual(isTaskLine("hello"), false);
   assert.strictEqual(stripTask("[ ] hello"), "hello");
   assert.strictEqual(stripTask("[✓] hello"), "hello");
+
+  // Multi-line block toggle
+  var block1 = "Catsset idea\nCar on border\nHover preview";
+  var conv1 = toggleTaskBlock(block1);
+  assert.strictEqual(conv1, "[ ] Catsset idea\n[ ] Car on border\n[ ] Hover preview");
+  // All open → toggle all to done
+  var conv2 = toggleTaskBlock(conv1);
+  assert.strictEqual(conv2, "[✓] Catsset idea\n[✓] Car on border\n[✓] Hover preview");
+  // All done → toggle all back to open
+  var conv3 = toggleTaskBlock(conv2);
+  assert.strictEqual(conv3, "[ ] Catsset idea\n[ ] Car on border\n[ ] Hover preview");
+  // Mixed: some tasks, some not → all non-tasks become open, tasks stay
+  var mixed = toggleTaskBlock("[✓] done one\nplain line\n[ ] open one");
+  assert.strictEqual(mixed, "[✓] done one\n[ ] plain line\n[ ] open one");
+  // Empty lines preserved
+  var withEmpty = toggleTaskBlock("item 1\n\nitem 2");
+  assert.strictEqual(withEmpty, "[ ] item 1\n\n[ ] item 2");
 
   var counts = taskCounts("[ ] task 1\n[✓] task 2\nplain text\n[ ] task 3");
   assert.deepStrictEqual(counts, { done: 1, total: 3 });

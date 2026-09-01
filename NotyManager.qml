@@ -17,6 +17,7 @@ Item {
   property string mode: "all" // "all" | "archive"
   property string searchQuery: ""
   property int selectedNoteId: -1
+  property int loadedDetailNoteId: -1
   property var notesList: []
   property string fontFamily: ""
   property real fontSize: 13.5
@@ -76,10 +77,23 @@ Item {
     }
   }
 
+  // Load text only when switching to a different note, not when the same
+  // note is refreshed from DB after a save (which would clobber in-progress typing)
+  onSelectedNoteIdChanged: {
+    if (selectedNoteId < 0 || selectedNoteId === loadedDetailNoteId) {
+      if (selectedNoteId < 0) { loadedDetailNoteId = -1; detailTextArea.text = "" }
+      return
+    }
+    loadedDetailNoteId = selectedNoteId
+    var n = selectedNote
+    detailTextArea.text = n ? (n.body || "") : ""
+  }
+
   function show(initialMode) {
     mode = initialMode || "all"
     searchQuery = ""
     open = true
+    loadedDetailNoteId = -1
     if (filteredNotes.length > 0) selectedNoteId = filteredNotes[0].id
   }
 
@@ -458,7 +472,12 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: mgrRoot.selectedNoteId = modelData.id
+                onClicked: {
+                  if (mgrRoot.selectedNoteId !== modelData.id) {
+                    detailEditor.flush()
+                    mgrRoot.selectedNoteId = modelData.id
+                  }
+                }
               }
             }
           }
@@ -749,8 +768,6 @@ Item {
                   bottomPadding: 12
                   background: Rectangle { color: "transparent" }
 
-                  text: mgrRoot.selectedNote ? (mgrRoot.selectedNote.body || "") : ""
-
                   onTextChanged: {
                     if (mgrRoot.selectedNote && mgrRoot.selectedNote.id >= 0) {
                       mgrAutosaveTimer.restart()
@@ -815,19 +832,24 @@ Item {
                     }
 
                     if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_T) {
-                      var full = detailTextArea.text
-                      var cur = detailTextArea.cursorPosition
-                      var lineStart = full.lastIndexOf("\n", Math.max(0, cur - 1)) + 1
-                      var lineEnd = full.indexOf("\n", cur)
-                      if (lineEnd === -1) lineEnd = full.length
-                      var line = full.substring(lineStart, lineEnd)
-                      var toggled = Model.toggleTaskLine(line)
-                      var next = full.substring(0, lineStart) + toggled + full.substring(lineEnd)
-                      detailTextArea.text = next
-                      detailTextArea.cursorPosition = Math.min(next.length, cur + (toggled.length - line.length))
-                      mgrAutosaveTimer.restart()
+                      detailEditor.toggleTask()
                       event.accepted = true
                       return
+                    }
+
+                    // Ctrl+V: Convert markdown task syntax from pasted content
+                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
+                      Qt.callLater(function() {
+                        var after = detailTextArea.text
+                        var converted = Model.tasksFromMarkdown(after)
+                        if (converted !== after) {
+                          var curPos = detailTextArea.cursorPosition
+                          var newCursor = Model.tasksFromMarkdown(after.substring(0, curPos)).length
+                          detailTextArea.text = converted
+                          detailTextArea.cursorPosition = newCursor
+                          mgrAutosaveTimer.restart()
+                        }
+                      })
                     }
                   }
                 }
@@ -847,6 +869,35 @@ Item {
         var tit = Model.derivedTitle(detailTextArea.text)
         mgrRoot.saveRequested(mgrRoot.selectedNote.id, tit, detailTextArea.text)
       }
+    }
+    function toggleTask() {
+      var full = detailTextArea.text
+      var selStart = detailTextArea.selectionStart
+      var selEnd = detailTextArea.selectionEnd
+
+      if (selEnd > selStart) {
+        var lineStart = full.lastIndexOf("\n", Math.max(0, selStart - 1)) + 1
+        var lineEnd = full.indexOf("\n", selEnd)
+        if (lineEnd === -1) lineEnd = full.length
+        var block = full.substring(lineStart, lineEnd)
+        var newBlock = Model.toggleTaskBlock(block)
+        var next = full.substring(0, lineStart) + newBlock + full.substring(lineEnd)
+        detailTextArea.text = next
+        detailTextArea.select(lineStart, lineStart + newBlock.length)
+        mgrAutosaveTimer.restart()
+        return
+      }
+
+      var cur = detailTextArea.cursorPosition
+      var ls = full.lastIndexOf("\n", Math.max(0, cur - 1)) + 1
+      var le = full.indexOf("\n", cur)
+      if (le === -1) le = full.length
+      var line = full.substring(ls, le)
+      var toggled = Model.toggleTaskLine(line)
+      var next = full.substring(0, ls) + toggled + full.substring(le)
+      detailTextArea.text = next
+      detailTextArea.cursorPosition = Math.min(next.length, cur + (toggled.length - line.length))
+      mgrAutosaveTimer.restart()
     }
   }
 
