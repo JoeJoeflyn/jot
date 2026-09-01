@@ -130,11 +130,25 @@ Item {
     id: dbWrite
     stdout: StdioCollector { id: writeOut; waitForEnd: true }
     onExited: function(code) {
-      loadNotes()
+      if (root.reloadAfterWrite) {
+        root.reloadAfterWrite = false
+        loadNotes()
+      }
     }
   }
 
+  // Most writes (content saves during typing) don't need to reload all notes —
+  // that rebuilds activeNotes and can flash the "NEW NOTE" placeholder if the
+  // read hits a SQLite lock. Only structural changes set this flag.
+  property bool reloadAfterWrite: false
+
   function runWrite(sql) {
+    dbWrite.command = ["sqlite3", dbPath, sql]
+    dbWrite.running = true
+  }
+
+  function runWriteReload(sql) {
+    root.reloadAfterWrite = true
     dbWrite.command = ["sqlite3", dbPath, sql]
     dbWrite.running = true
   }
@@ -181,6 +195,7 @@ Item {
       "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=7 WHERE color='slate';\""
     ].join(" && ")
 
+    root.reloadAfterWrite = true
     dbWrite.command = ["bash", "-c", initCommands]
     dbWrite.running = true
   }
@@ -284,21 +299,21 @@ Item {
   }
 
   function setNoteColor(id, colorIdx) {
-    runWrite(Model.setColorSql(id, colorIdx))
+    runWriteReload(Model.setColorSql(id, colorIdx))
   }
 
   function toggleNotePin(id) {
     for (var i = 0; i < root.notes.length; i++) {
       if (root.notes[i].id === id) {
         var nextPin = root.notes[i].pinned === 1 ? 0 : 1
-        runWrite(Model.setPinnedSql(id, nextPin))
+        runWriteReload(Model.setPinnedSql(id, nextPin))
         return
       }
     }
   }
 
   function archiveNote(id, toArchived) {
-    runWrite(Model.archiveSql(id, toArchived !== undefined ? toArchived : true))
+    runWriteReload(Model.archiveSql(id, toArchived !== undefined ? toArchived : true))
     if (root.activeNoteId === id) root.collapseToFan()
   }
 
@@ -312,12 +327,12 @@ Item {
     // Immediately remove from display and show undo toast
     if (root.activeNoteId === id) root.collapseToFan()
     undoToast.start(target)
-    runWrite(Model.deleteSql(id))
+    runWriteReload(Model.deleteSql(id))
   }
 
   function restoreDeletedNote(note) {
     if (!note) return
-    runWrite(Model.restoreNoteSql(note))
+    runWriteReload(Model.restoreNoteSql(note))
   }
 
   function moveNoteUp(id) {
@@ -332,7 +347,7 @@ Item {
       arr[idx - 1] = tmp
       root.activeNotes = arr
       var ids = arr.map(function(n) { return n.id })
-      runWrite(Model.reorderNotesSql(ids))
+      runWriteReload(Model.reorderNotesSql(ids))
     }
   }
 
@@ -348,7 +363,7 @@ Item {
       arr[idx + 1] = tmp
       root.activeNotes = arr
       var ids = arr.map(function(n) { return n.id })
-      runWrite(Model.reorderNotesSql(ids))
+      runWriteReload(Model.reorderNotesSql(ids))
     }
   }
 
@@ -416,7 +431,7 @@ Item {
       if (code === 0 && proc.out) {
         var imported = Model.parseStickiesJson(proc.out)
         for (var i = 0; i < imported.length; i++) {
-          runWrite(Model.insertSql(imported[i].title, imported[i].body, imported[i].color))
+          runWriteReload(Model.insertSql(imported[i].title, imported[i].body, imported[i].color))
         }
       }
     }
