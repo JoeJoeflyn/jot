@@ -126,31 +126,46 @@ Item {
     dbRead.running = true
   }
 
+  // Serialized write queue — prevents overlapping sqlite3 invocations from
+  // racing the single dbWrite Process (command overwrite / dropped writes /
+  // reload flag cleared by the wrong onExited). Each entry is { sql, reload }.
+  property var writeQueue: []
+  property bool writeInFlight: false
+  property bool reloadPending: false
+
+  function drainWriteQueue() {
+    if (root.writeInFlight || root.writeQueue.length === 0) return
+    var next = root.writeQueue.shift()
+    root.writeInFlight = true
+    if (next.reload) root.reloadPending = true
+    dbWrite.command = ["sqlite3", dbPath, next.sql]
+    dbWrite.running = true
+  }
+
+  function runWrite(sql) {
+    root.writeQueue.push({ sql: sql, reload: false })
+    root.drainWriteQueue()
+  }
+
+  function runWriteReload(sql) {
+    root.writeQueue.push({ sql: sql, reload: true })
+    root.drainWriteQueue()
+  }
+
   Process {
     id: dbWrite
     stdout: StdioCollector { id: writeOut; waitForEnd: true }
     onExited: function(code) {
-      if (root.reloadAfterWrite) {
-        root.reloadAfterWrite = false
-        loadNotes()
+      root.writeInFlight = false
+      if (root.writeQueue.length > 0) {
+        root.drainWriteQueue()
+      } else {
+        if (root.reloadPending) {
+          root.reloadPending = false
+          loadNotes()
+        }
       }
     }
-  }
-
-  // Most writes (content saves during typing) don't need to reload all notes —
-  // that rebuilds activeNotes and can flash the "NEW NOTE" placeholder if the
-  // read hits a SQLite lock. Only structural changes set this flag.
-  property bool reloadAfterWrite: false
-
-  function runWrite(sql) {
-    dbWrite.command = ["sqlite3", dbPath, sql]
-    dbWrite.running = true
-  }
-
-  function runWriteReload(sql) {
-    root.reloadAfterWrite = true
-    dbWrite.command = ["sqlite3", dbPath, sql]
-    dbWrite.running = true
   }
 
   function loadNotes() {
@@ -195,7 +210,8 @@ Item {
       "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=7 WHERE color='slate';\""
     ].join(" && ")
 
-    root.reloadAfterWrite = true
+    root.reloadPending = true
+    root.writeInFlight = true
     dbWrite.command = ["bash", "-c", initCommands]
     dbWrite.running = true
   }
