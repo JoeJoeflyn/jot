@@ -132,6 +132,7 @@ Item {
   property var writeQueue: []
   property bool writeInFlight: false
   property bool reloadPending: false
+  property var reloadCallback: null
 
   function drainWriteQueue() {
     if (root.writeInFlight || root.writeQueue.length === 0) return
@@ -152,6 +153,12 @@ Item {
     root.drainWriteQueue()
   }
 
+  function runWriteReloadCb(sql, cb) {
+    root.reloadCallback = cb
+    root.writeQueue.push({ sql: sql, reload: true })
+    root.drainWriteQueue()
+  }
+
   Process {
     id: dbWrite
     stdout: StdioCollector { id: writeOut; waitForEnd: true }
@@ -162,14 +169,22 @@ Item {
       } else {
         if (root.reloadPending) {
           root.reloadPending = false
-          loadNotes()
+          loadNotes(function() {
+            if (root.reloadCallback) {
+              var cb = root.reloadCallback
+              root.reloadCallback = null
+              cb()
+            }
+          })
         }
       }
     }
   }
 
-  function loadNotes() {
+  function loadNotes(done) {
+    console.log("NOTY loadNotes called")
     runSelect(Model.selectAllSql(), function(rows) {
+      console.log("NOTY loadNotes rows=" + rows.length)
       root.notes = rows
       var act = []
       var arch = []
@@ -192,6 +207,15 @@ Item {
         }
         if (!found) root.collapseToFan()
       }
+
+      // Seed lastSnapBody from DB so restarts don't create phantom history.
+      // Runs after the main callback so we don't clobber pendingRowsCallback.
+      if (typeof done === "function") done()
+      runSelect(Model.selectLatestHistoryBodiesSql(), function(histRows) {
+        for (var h = 0; h < histRows.length; h++) {
+          root.lastSnapBody[histRows[h].note_id] = String(histRows[h].body || "")
+        }
+      })
     })
   }
 
@@ -227,6 +251,7 @@ Item {
     if (screen) root.activeScreen = screen
     var nid = Number(noteId)
     root.activeNoteId = nid
+    root.snapshotNote(nid)
     if (index !== undefined && index >= 0) root.activeNoteIndex = index
     else {
       for (var i = 0; i < root.activeNotes.length; i++) {
@@ -316,15 +341,70 @@ Item {
   }
 
   function saveNote(id, title, body) {
-    for (var i = 0; i < root.activeNotes.length; i++) {
-      if (root.activeNotes[i].id === id) {
-        root.activeNotes[i].title = title
-        root.activeNotes[i].body = body
-        root.activeNotes[i].updated_at = Math.floor(Date.now() / 1000)
+    var nb = String(body === null || body === undefined ? "" : body);
+    for (var i = 0; i < root.notes.length; i++) {
+      if (Number(root.notes[i].id) === Number(id)) {
+        // ponytail: never autosave empty over non-empty, use Delete to remove
+        if (nb.trim() === "" && String(root.notes[i].body || "").trim() !== "") return;
+        root.notes[i].title = title
+        root.notes[i].body = body
+        root.notes[i].updated_at = Math.floor(Date.now() / 1000)
         break
       }
     }
+    // ponytail: QML doesn't observe in-place object mutation; reassign array
+    // refs so bindings (manager filteredNotes, deck currentActiveNote/tabs)
+    // recompute. Objects stay shared, so editor onNoteChanged (guarded by id)
+    // won't clobber in-progress typing.
+    root.notes = root.notes.slice()
+    root.activeNotes = root.activeNotes.slice()
+    root.archivedNotes = root.archivedNotes.slice()
     runWrite(Model.updateSql(id, title, body))
+  }
+
+  // Note version history (rollback). Snapshots the pre-edit version when a
+  // note is opened; restore snapshots first so a restore is itself undoable.
+  property var lastSnapBody: ({})
+
+  function snapshotNote(id, force) {
+    for (var i = 0; i < root.notes.length; i++) {
+      if (Number(root.notes[i].id) === Number(id)) {
+        var ob = String(root.notes[i].body || "")
+        if (ob.trim() === "") return
+        if (!force && root.lastSnapBody[id] === ob) return
+        root.lastSnapBody[id] = ob
+        runWrite(Model.insertHistorySql(id, root.notes[i].title, ob) + Model.pruneHistorySql(id, Model.HISTORY_KEEP))
+        return
+      }
+    }
+  }
+
+  function loadHistory(id) {
+    runSelect(Model.selectHistorySql(id), function(rows) {
+      libraryManager.historyList = rows
+    })
+  }
+
+  function restoreHistoryVersion(id, title, body) {
+    snapshotNote(id, true)
+    // Update in-memory so the editor shows new content immediately
+    for (var i = 0; i < root.notes.length; i++) {
+      if (Number(root.notes[i].id) === Number(id)) {
+        root.notes[i].title = title
+        root.notes[i].body = body
+        root.notes[i].updated_at = Math.floor(Date.now() / 1000)
+        break
+      }
+    }
+    root.notes = root.notes.slice()
+    root.activeNotes = root.activeNotes.slice()
+    root.archivedNotes = root.archivedNotes.slice()
+    // Queue the DB update with reload + callback — loadNotes runs AFTER the
+    // write flushes, then refreshDetail + loadHistory see the restored content.
+    runWriteReloadCb(Model.updateSql(id, title, body), function() {
+      libraryManager.refreshDetail()
+      loadHistory(id)
+    })
   }
 
   function setNoteColor(id, colorIdx) {
@@ -1156,6 +1236,15 @@ Item {
       onSaveRequested: function(id, tit, body) {
         root.saveNote(id, tit, body)
       }
+      onHistoryRequested: function(id) {
+        root.loadHistory(id)
+      }
+      onSnapshotRequested: function(id) {
+        root.snapshotNote(id)
+      }
+      onHistoryRestoreRequested: function(id, tit, body) {
+        root.restoreHistoryVersion(id, tit, body)
+      }
       onColorChanged: function(id, colIdx) {
         root.setNoteColor(id, colIdx)
       }
@@ -1173,8 +1262,7 @@ Item {
 
   onManagerOpenChanged: {
     if (managerOpen) {
-      loadNotes()
-      libraryManager.show(root.managerInitialMode)
+      loadNotes(function() { libraryManager.show(root.managerInitialMode) })
     }
   }
 
@@ -1193,10 +1281,12 @@ Item {
       console.log("NOTY OPEN IPC parsed:", JSON.stringify(p))
       if (p.action === "manager" || p.action === "all") {
         root.managerInitialMode = "all"
-        root.managerOpen = true
+        if (root.managerOpen) loadNotes(function() { libraryManager.show("all") })
+        else root.managerOpen = true
       } else if (p.action === "archive") {
         root.managerInitialMode = "archive"
-        root.managerOpen = true
+        if (root.managerOpen) loadNotes(function() { libraryManager.show("archive") })
+        else root.managerOpen = true
       } else if (p.action === "new") {
         root.newNote()
       } else if (p.action === "expand" || p.id !== undefined) {

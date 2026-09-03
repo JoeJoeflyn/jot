@@ -21,6 +21,8 @@ Item {
   property var notesList: []
   property string fontFamily: ""
   property real fontSize: 13.5
+  property var historyList: []
+  property bool historyOpen: false
 
   signal closeRequested()
   signal newNoteRequested()
@@ -29,10 +31,16 @@ Item {
   signal pinToggled(int id)
   signal archiveToggled(int id, bool toArchived)
   signal deleteRequested(int id)
+  signal historyRequested(int id)
+  signal snapshotRequested(int id)
+  signal historyRestoreRequested(int id, string title, string body)
 
   visible: open
   opacity: open ? 1.0 : 0.0
-  Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+  scale: open ? 1.0 : 0.96
+  transformOrigin: Item.Center
+  Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+  Behavior on scale { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
 
   // Filtered notes list based on mode and searchQuery
   readonly property var filteredNotes: {
@@ -85,22 +93,53 @@ Item {
       return
     }
     loadedDetailNoteId = selectedNoteId
-    var n = selectedNote
+    // Look up directly from notesList — the selectedNote binding may not have
+    // recomputed yet during signal cascades (onFilteredNotesChanged → selectedNoteId).
+    var n = null
+    for (var i = 0; i < notesList.length; i++) {
+      if (notesList[i].id === selectedNoteId) { n = notesList[i]; break }
+    }
     detailTextArea.text = n ? (n.body || "") : ""
+    historyList = []
+    historyOpen = false
   }
 
   function show(initialMode) {
     mode = initialMode || "all"
     searchQuery = ""
     open = true
-    loadedDetailNoteId = -1
-    if (filteredNotes.length > 0) selectedNoteId = filteredNotes[0].id
+    historyList = []
+    historyOpen = false
+    if (filteredNotes.length > 0) {
+      loadedDetailNoteId = -1
+      selectedNoteId = filteredNotes[0].id
+    }
+    refreshDetail()
+    if (selectedNoteId >= 0) snapshotRequested(selectedNoteId)
+  }
+
+  function refreshDetail() {
+    var n = selectedNote
+    if (n && detailTextArea) {
+      loadedDetailNoteId = n.id
+      detailTextArea.text = n.body || ""
+    }
+    historyList = []
+    historyOpen = false
   }
 
   function close() {
     open = false
     detailEditor.flush()
     closeRequested()
+  }
+
+  // Flush current edit before switching mode — selectedNote is still valid here,
+  // before filteredNotes recomputes and clears selectedNoteId.
+  function switchMode(newMode) {
+    if (mode === newMode) return
+    detailEditor.flush()
+    mode = newMode
   }
 
   // Dismiss on click outside modal card
@@ -116,20 +155,29 @@ Item {
     anchors.centerIn: parent
     width: Math.min(parent.width - 40, 760)
     height: Math.min(parent.height - 40, 520)
-    radius: 12
+    radius: 14
     color: Color.menu.background || Qt.rgba(0.12, 0.12, 0.14, 0.98)
-    border.color: Color.menu.border || Qt.rgba(1, 1, 1, 0.12)
+    border.color: Color.menu.border || Qt.rgba(1, 1, 1, 0.10)
     border.width: 1
 
-    // Drop shadow
+    // Apple-style soft, layered shadow (outer diffuse + inner tight)
+    Rectangle {
+      anchors.fill: parent
+      anchors.margins: -2
+      z: -2
+      radius: parent.radius + 2
+      color: "transparent"
+      border.color: Qt.rgba(0, 0, 0, 0.30)
+      border.width: 6
+    }
     Rectangle {
       anchors.fill: parent
       anchors.margins: -1
       z: -1
       radius: parent.radius + 1
       color: "transparent"
-      border.color: Qt.rgba(0, 0, 0, 0.45)
-      border.width: 3
+      border.color: Qt.rgba(0, 0, 0, 0.50)
+      border.width: 2
     }
 
     // Swallow clicks inside the card
@@ -146,14 +194,14 @@ Item {
         width: parent.width
         height: 48
         color: Qt.rgba(1, 1, 1, 0.03)
-        radius: 12
+        radius: 14
 
         // Square bottom corners
         Rectangle {
           anchors.bottom: parent.bottom
           anchors.left: parent.left
           anchors.right: parent.right
-          height: 12
+          height: 14
           color: parent.color
         }
 
@@ -168,9 +216,9 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: 180
             height: 28
-            radius: 7
-            color: Qt.rgba(0, 0, 0, 0.35)
-            border.color: Qt.rgba(1, 1, 1, 0.08)
+            radius: 8
+            color: Qt.rgba(0, 0, 0, 0.30)
+            border.color: Qt.rgba(1, 1, 1, 0.06)
             border.width: 0.5
 
             Row {
@@ -182,22 +230,29 @@ Item {
               Rectangle {
                 width: (parent.width - 2) / 2
                 height: parent.height
-                radius: 5
-                color: mgrRoot.mode === "all" ? Qt.rgba(1, 1, 1, 0.18) : "transparent"
+                radius: 6
+                color: mgrRoot.mode === "all"
+                  ? (allSegMouse.containsPress ? Qt.rgba(1, 1, 1, 0.22) : Qt.rgba(1, 1, 1, 0.16))
+                  : (allSegMouse.containsPress ? Qt.rgba(1, 1, 1, 0.08) : "transparent")
+                Behavior on color { ColorAnimation { duration: 120 } }
 
                 Text {
                   anchors.centerIn: parent
                   text: "All Notes"
-                  color: mgrRoot.mode === "all" ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.6)
+                  color: mgrRoot.mode === "all" ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.55)
                   font.family: Style.font.family
                   font.pixelSize: 11
                   font.bold: mgrRoot.mode === "all"
+                  // ponytail: tracking bump for small caps-style labels
+                  font.letterSpacing: 0.3
                 }
 
                 MouseArea {
+                  id: allSegMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: mgrRoot.mode = "all"
+                  onClicked: mgrRoot.switchMode("all")
                 }
               }
 
@@ -205,22 +260,28 @@ Item {
               Rectangle {
                 width: (parent.width - 2) / 2
                 height: parent.height
-                radius: 5
-                color: mgrRoot.mode === "archive" ? Qt.rgba(1, 1, 1, 0.18) : "transparent"
+                radius: 6
+                color: mgrRoot.mode === "archive"
+                  ? (archSegMouse.containsPress ? Qt.rgba(1, 1, 1, 0.22) : Qt.rgba(1, 1, 1, 0.16))
+                  : (archSegMouse.containsPress ? Qt.rgba(1, 1, 1, 0.08) : "transparent")
+                Behavior on color { ColorAnimation { duration: 120 } }
 
                 Text {
                   anchors.centerIn: parent
                   text: "Archive"
-                  color: mgrRoot.mode === "archive" ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.6)
+                  color: mgrRoot.mode === "archive" ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.55)
                   font.family: Style.font.family
                   font.pixelSize: 11
                   font.bold: mgrRoot.mode === "archive"
+                  font.letterSpacing: 0.3
                 }
 
                 MouseArea {
+                  id: archSegMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: mgrRoot.mode = "archive"
+                  onClicked: mgrRoot.switchMode("archive")
                 }
               }
             }
@@ -231,10 +292,11 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: 220
             height: 28
-            radius: 7
-            color: Qt.rgba(1, 1, 1, 0.06)
-            border.color: Qt.rgba(1, 1, 1, 0.08)
+            radius: 8
+            color: Qt.rgba(1, 1, 1, 0.05)
+            border.color: searchInput.activeFocus ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.06)
             border.width: 0.5
+            Behavior on border.color { ColorAnimation { duration: 160 } }
 
             Row {
               anchors.fill: parent
@@ -267,10 +329,13 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 text: "✕"
                 font.pixelSize: 10
-                color: Qt.rgba(1, 1, 1, 0.50)
+                color: searchClearMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.70) : Qt.rgba(1, 1, 1, 0.45)
+                Behavior on color { ColorAnimation { duration: 100 } }
                 MouseArea {
+                  id: searchClearMouse
                   anchors.fill: parent
                   anchors.margins: -4
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: searchInput.text = ""
                 }
@@ -290,8 +355,13 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: newNoteLabel.implicitWidth + 18
             height: 28
-            radius: 6
-            color: newNoteMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : Qt.rgba(1, 1, 1, 0.08)
+            radius: 7
+            color: newNoteMouse.containsPress
+              ? Qt.rgba(1, 1, 1, 0.20)
+              : (newNoteMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : Qt.rgba(1, 1, 1, 0.08))
+            Behavior on color { ColorAnimation { duration: 100 } }
+            scale: newNoteMouse.containsPress ? 0.96 : 1.0
+            Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
 
             Row {
               anchors.centerIn: parent
@@ -330,8 +400,13 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: 28
             height: 28
-            radius: 6
-            color: closeMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+            radius: 7
+            color: closeMouse.containsPress
+              ? Qt.rgba(1, 1, 1, 0.20)
+              : (closeMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : "transparent")
+            Behavior on color { ColorAnimation { duration: 100 } }
+            scale: closeMouse.containsPress ? 0.92 : 1.0
+            Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
 
             Text {
               anchors.centerIn: parent
@@ -351,11 +426,11 @@ Item {
         }
       }
 
-      // Horizontal Divider
+      // Horizontal Divider — soft edge, not hard line
       Rectangle {
         width: parent.width
         height: 1
-        color: Qt.rgba(1, 1, 1, 0.08)
+        color: Qt.rgba(1, 1, 1, 0.06)
       }
 
       // TWO-PANE BODY: Left Sidebar + Right Detail
@@ -382,8 +457,10 @@ Item {
               width: listView.width
               height: 52
               color: mgrRoot.selectedNoteId === modelData.id
-                ? Qt.rgba(1, 1, 1, 0.12)
-                : (rowHover.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent")
+                ? Qt.rgba(1, 1, 1, 0.10)
+                : (rowHover.containsPress ? Qt.rgba(1, 1, 1, 0.08)
+                  : (rowHover.containsMouse ? Qt.rgba(1, 1, 1, 0.04) : "transparent"))
+              Behavior on color { ColorAnimation { duration: 120 } }
 
               readonly property var pal: Model.colorByIndex(modelData.color)
               readonly property var counts: Model.taskCounts(modelData.body)
@@ -412,9 +489,10 @@ Item {
                   // Title
                   Text {
                     text: Model.displayTitle(modelData)
-                    color: "#FFFFFF"
+                    color: mgrRoot.selectedNoteId === modelData.id ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.85)
                     font.family: Style.font.family
                     font.pixelSize: 13
+                    font.weight: mgrRoot.selectedNoteId === modelData.id ? Font.Medium : Font.Normal
                     elide: Text.ElideRight
                     width: parent.width
                   }
@@ -476,6 +554,7 @@ Item {
                   if (mgrRoot.selectedNoteId !== modelData.id) {
                     detailEditor.flush()
                     mgrRoot.selectedNoteId = modelData.id
+                    mgrRoot.snapshotRequested(modelData.id)
                   }
                 }
               }
@@ -486,14 +565,16 @@ Item {
           Rectangle {
             width: parent.width
             height: 28
-            color: Qt.rgba(1, 1, 1, 0.02)
+            color: Qt.rgba(1, 1, 1, 0.015)
 
             Text {
               anchors.centerIn: parent
               text: mgrRoot.filteredNotes.length + " " + (mgrRoot.filteredNotes.length === 1 ? "note" : "notes")
-              color: Qt.rgba(1, 1, 1, 0.40)
+              color: Qt.rgba(1, 1, 1, 0.35)
               font.family: Style.font.family
-              font.pixelSize: 11
+              font.pixelSize: 10
+              font.weight: Font.Medium
+              font.letterSpacing: 0.3
             }
           }
         }
@@ -502,7 +583,7 @@ Item {
         Rectangle {
           width: 1
           height: parent.height
-          color: Qt.rgba(1, 1, 1, 0.08)
+          color: Qt.rgba(1, 1, 1, 0.06)
         }
 
         // RIGHT DETAIL PANE
@@ -518,21 +599,23 @@ Item {
 
             Column {
               anchors.centerIn: parent
-              spacing: 8
+              spacing: 10
 
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: "≡"
-                font.pixelSize: 32
-                color: Qt.rgba(1, 1, 1, 0.25)
+                font.pixelSize: 28
+                font.weight: Font.Light
+                color: Qt.rgba(1, 1, 1, 0.20)
               }
 
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: mgrRoot.filteredNotes.length === 0 ? "No notes found" : "Select a note"
-                color: Qt.rgba(1, 1, 1, 0.45)
+                color: Qt.rgba(1, 1, 1, 0.40)
                 font.family: Style.font.family
                 font.pixelSize: 13
+                font.weight: Font.Medium
               }
             }
           }
@@ -549,6 +632,15 @@ Item {
             Rectangle {
               anchors.fill: parent
               color: detailContainer.curPal.paper
+              radius: 12
+              // Cover top corners so only bottom-right follows card radius
+              Rectangle {
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: parent.radius
+                color: parent.color
+              }
             }
 
             Column {
@@ -568,77 +660,69 @@ Item {
                   anchors.fill: parent
                   anchors.leftMargin: 14
                   anchors.rightMargin: 14
-                  spacing: 8
+                  spacing: 6
 
-                  // 8 Color Swatches
-                  Repeater {
-                    model: Model.COLORS
-                    delegate: Item {
-                      width: 14
-                      height: 38
-                      anchors.verticalCenter: parent.verticalCenter
-
-                      Rectangle {
-                        anchors.centerIn: parent
-                        width: 10
-                        height: 10
-                        radius: 5
-                        color: modelData.dash
-
-                        // Active Ring
+                  // 8 Color Swatches (tight cluster)
+                  Row {
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 3
+                    Repeater {
+                      model: Model.COLORS
+                      delegate: Item {
+                        width: 12
+                        height: 38
                         Rectangle {
-                          anchors.fill: parent
-                          anchors.margins: -2
-                          radius: width / 2
-                          color: "transparent"
-                          border.color: mgrRoot.selectedNote && mgrRoot.selectedNote.color === index
-                            ? detailContainer.curPal.ink
-                            : "transparent"
-                          border.width: 1.5
+                          anchors.centerIn: parent
+                          width: 10
+                          height: 10
+                          radius: 5
+                          color: modelData.dash
+                          Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: -2
+                            radius: width / 2
+                            color: "transparent"
+                            border.color: mgrRoot.selectedNote && mgrRoot.selectedNote.color === index
+                              ? detailContainer.curPal.ink
+                              : "transparent"
+                            border.width: 1.5
+                          }
                         }
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                          if (mgrRoot.selectedNote) {
-                            mgrRoot.colorChanged(mgrRoot.selectedNote.id, index)
+                        MouseArea {
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: {
+                            if (mgrRoot.selectedNote) {
+                              mgrRoot.colorChanged(mgrRoot.selectedNote.id, index)
+                            }
                           }
                         }
                       }
                     }
                   }
 
-                  // Spacer
+                  // Flexible spacer
                   Item {
-                    width: Math.max(10, parent.width - (14 * 8 + 8 * 7) - 240)
+                    width: Math.max(8, parent.width - 12 * 8 - 3 * 7 - 6 * 5 - 24 - (histLabel.implicitWidth + 14) - (archLabel.implicitWidth + 14) - 24)
                     height: 1
-                  }
-
-                  // Edited timestamp
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Edited " + Model.ago(mgrRoot.selectedNote ? mgrRoot.selectedNote.updated_at : 0)
-                    color: Qt.rgba(
-                      parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
-                      parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
-                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.55)
-                    font.family: Style.font.family
-                    font.pixelSize: 11
                   }
 
                   // Pin/Unpin button
                   Rectangle {
+                    id: pinBtn
                     anchors.verticalCenter: parent.verticalCenter
                     width: 24
                     height: 22
-                    radius: 5
+                    radius: 6
                     color: Qt.rgba(
                       parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
                       parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
-                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.08)
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255,
+                      pinMouse.containsPress ? 0.16 : 0.08)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    scale: pinMouse.containsPress ? 0.92 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
 
                     Canvas {
                       anchors.centerIn: parent
@@ -678,7 +762,9 @@ Item {
                     }
 
                     MouseArea {
+                      id: pinMouse
                       anchors.fill: parent
+                      hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
                       onClicked: {
                         if (mgrRoot.selectedNote) mgrRoot.pinToggled(mgrRoot.selectedNote.id)
@@ -686,16 +772,65 @@ Item {
                     }
                   }
 
+                  // History / rollback button
+                  Rectangle {
+                    id: histBtn
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: histLabel.implicitWidth + 14
+                    height: 22
+                    radius: 6
+                    color: mgrRoot.historyOpen ? Qt.rgba(
+                      parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.20) : Qt.rgba(
+                      parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255,
+                      histMouse.containsPress ? 0.16 : 0.08)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    scale: histMouse.containsPress ? 0.95 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
+
+                    Text {
+                      id: histLabel
+                      anchors.centerIn: parent
+                      text: "↺ History"
+                      color: detailContainer.curPal.ink
+                      font.family: Style.font.family
+                      font.pixelSize: 11
+                    }
+
+                    MouseArea {
+                      id: histMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        if (mgrRoot.historyOpen) {
+                          mgrRoot.historyOpen = false
+                        } else if (mgrRoot.selectedNote) {
+                          mgrRoot.historyRequested(mgrRoot.selectedNote.id)
+                          mgrRoot.historyOpen = true
+                        }
+                      }
+                    }
+                  }
+
                   // Archive / Restore button
                   Rectangle {
+                    id: archBtn
                     anchors.verticalCenter: parent.verticalCenter
                     width: archLabel.implicitWidth + 14
                     height: 22
-                    radius: 5
+                    radius: 6
                     color: Qt.rgba(
                       parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
                       parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
-                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.08)
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255,
+                      archMouse.containsPress ? 0.16 : 0.08)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    scale: archMouse.containsPress ? 0.95 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
 
                     Text {
                       id: archLabel
@@ -707,7 +842,9 @@ Item {
                     }
 
                     MouseArea {
+                      id: archMouse
                       anchors.fill: parent
+                      hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
                       onClicked: {
                         if (mgrRoot.selectedNote) {
@@ -719,14 +856,19 @@ Item {
 
                   // Delete button
                   Rectangle {
+                    id: delBtn
                     anchors.verticalCenter: parent.verticalCenter
                     width: 24
                     height: 22
-                    radius: 5
+                    radius: 6
                     color: Qt.rgba(
                       parseInt(detailContainer.curPal.ink.substring(1,3), 16)/255,
                       parseInt(detailContainer.curPal.ink.substring(3,5), 16)/255,
-                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255, 0.08)
+                      parseInt(detailContainer.curPal.ink.substring(5,7), 16)/255,
+                      delMouse.containsPress ? 0.16 : 0.08)
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    scale: delMouse.containsPress ? 0.92 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
 
                     Text {
                       anchors.centerIn: parent
@@ -737,7 +879,9 @@ Item {
                     }
 
                     MouseArea {
+                      id: delMouse
                       anchors.fill: parent
+                      hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
                       onClicked: {
                         if (mgrRoot.selectedNote) mgrRoot.deleteRequested(mgrRoot.selectedNote.id)
@@ -868,6 +1012,239 @@ Item {
             }
           }
         }
+
+        // History / rollback popup
+        Rectangle {
+          id: historyPopup
+          visible: mgrRoot.historyOpen && mgrRoot.selectedNote !== null
+          anchors.top: parent.top
+          anchors.right: parent.right
+          anchors.topMargin: 44
+          anchors.rightMargin: 12
+          width: 340
+          height: mgrRoot.historyList.length === 0 ? 120 : Math.min(360, 116 + histListCol.implicitHeight)
+          radius: 12
+          color: Color.menu.background || Qt.rgba(0.12, 0.12, 0.14, 0.98)
+          border.color: Color.menu.border || Qt.rgba(1, 1, 1, 0.10)
+          border.width: 1
+          z: 50
+
+          // Origin-aware scale-in from the history button (top-right)
+          transformOrigin: Item.TopRight
+          scale: mgrRoot.historyOpen ? 1.0 : 0.95
+          opacity: mgrRoot.historyOpen ? 1.0 : 0.0
+          Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+          Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+
+          // Drop shadow
+          Rectangle {
+            anchors.fill: parent
+            anchors.margins: -1
+            z: -1
+            radius: parent.radius + 1
+            color: "transparent"
+            border.color: Qt.rgba(0, 0, 0, 0.45)
+            border.width: 3
+          }
+
+          // Click-outside-to-close (only swallows inside popup)
+          MouseArea {
+            anchors.fill: parent
+            onClicked: mgrRoot.historyOpen = false
+          }
+
+          Column {
+            id: histCol
+            anchors.fill: parent
+            anchors.margins: 12
+            spacing: 8
+
+            // Header: title + close
+            Row {
+              width: parent.width
+              spacing: 6
+
+              Text {
+                id: histTitleLabel
+                anchors.verticalCenter: parent.verticalCenter
+                text: "↺ Note history"
+                color: "#FFFFFF"
+                font.family: Style.font.family
+                font.pixelSize: 13
+                font.bold: true
+              }
+
+              Item {
+                width: Math.max(4, parent.width - histTitleLabel.implicitWidth - histCloseBtn.width - 6 - histCountLabel.implicitWidth - 12)
+                height: 1
+              }
+
+              Text {
+                id: histCountLabel
+                anchors.verticalCenter: parent.verticalCenter
+                visible: mgrRoot.historyList.length > 0
+                text: mgrRoot.historyList.length + (mgrRoot.historyList.length === 1 ? " version" : " versions")
+                color: Qt.rgba(1, 1, 1, 0.40)
+                font.family: Style.font.family
+                font.pixelSize: 10
+              }
+
+              Rectangle {
+                id: histCloseBtn
+                anchors.verticalCenter: parent.verticalCenter
+                width: 20
+                height: 20
+                radius: 5
+                color: histCloseMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : Qt.rgba(1, 1, 1, 0.06)
+                Text {
+                  anchors.centerIn: parent
+                  text: "✕"
+                  color: Qt.rgba(1, 1, 1, 0.60)
+                  font.pixelSize: 10
+                }
+                MouseArea {
+                  id: histCloseMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: mgrRoot.historyOpen = false
+                }
+              }
+            }
+
+            Text {
+              visible: mgrRoot.historyList.length > 0
+              text: "Click a version to restore it"
+              color: Qt.rgba(1, 1, 1, 0.45)
+              font.family: Style.font.family
+              font.pixelSize: 11
+            }
+
+            Text {
+              visible: mgrRoot.historyList.length === 0
+              text: "No older versions yet — one is saved each time you open this note."
+              color: Qt.rgba(1, 1, 1, 0.45)
+              font.family: Style.font.family
+              font.pixelSize: 11
+              wrapMode: Text.WordWrap
+              width: parent.width
+            }
+
+            ScrollView {
+              visible: mgrRoot.historyList.length > 0
+              width: parent.width
+              height: Math.min(254, histListCol.implicitHeight)
+              clip: true
+
+              Column {
+                id: histListCol
+                width: histCol.width - 4
+                spacing: 4
+
+                Repeater {
+                  model: mgrRoot.historyList
+                  delegate: Rectangle {
+                    width: histListCol.width
+                    height: 52
+                    radius: 7
+                    color: histRowMouse.containsPress
+                      ? Qt.rgba(1, 1, 1, 0.16)
+                      : (histRowMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.04))
+                    border.color: histRowMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    scale: histRowMouse.containsPress ? 0.98 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
+
+                    Row {
+                      anchors.fill: parent
+                      anchors.leftMargin: 10
+                      anchors.rightMargin: 8
+                      spacing: 8
+
+                      // Version index badge
+                      Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 22
+                        height: 22
+                        radius: 11
+                        color: Qt.rgba(1, 1, 1, 0.08)
+                        Text {
+                          anchors.centerIn: parent
+                          text: (index + 1)
+                          color: Qt.rgba(1, 1, 1, 0.60)
+                          font.family: Style.font.family
+                          font.pixelSize: 10
+                          font.bold: true
+                        }
+                      }
+
+                      Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 30 - (histRowMouse.containsMouse ? 56 : 0)
+                        spacing: 2
+
+                        Text {
+                          text: Model.displayTitle(modelData)
+                          color: "#FFFFFF"
+                          font.family: Style.font.family
+                          font.pixelSize: 12
+                          elide: Text.ElideRight
+                          width: parent.width
+                        }
+
+                        Row {
+                          width: parent.width
+                          spacing: 6
+                          Text {
+                            text: Model.ago(modelData.updated_at)
+                            color: Qt.rgba(1, 1, 1, 0.40)
+                            font.family: Style.font.family
+                            font.pixelSize: 10
+                          }
+                          Text {
+                            visible: text !== ""
+                            text: Model.notePreview(modelData.body)
+                            color: Qt.rgba(1, 1, 1, 0.35)
+                            font.family: Style.font.family
+                            font.pixelSize: 10
+                            elide: Text.ElideRight
+                            width: parent.width - 60
+                          }
+                        }
+                      }
+
+                      // Restore hint (hover)
+                      Text {
+                        visible: histRowMouse.containsMouse
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "↺ Restore"
+                        color: "#FFFFFF"
+                        font.family: Style.font.family
+                        font.pixelSize: 10
+                        font.bold: true
+                      }
+                    }
+
+                    MouseArea {
+                      id: histRowMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var n = mgrRoot.selectedNote
+                        if (n) {
+                          var t = String(modelData.title || "").trim() !== "" ? modelData.title : Model.derivedTitle(modelData.body)
+                          mgrRoot.historyRestoreRequested(n.id, t, modelData.body || "")
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -876,9 +1253,12 @@ Item {
     id: detailEditor
     function flush() {
       mgrAutosaveTimer.stop()
-      if (mgrRoot.selectedNote && mgrRoot.selectedNote.id >= 0 && detailTextArea) {
+      // Use loadedDetailNoteId, not selectedNote — selectedNote is a binding
+      // that can be null by the time flush runs (e.g. after filteredNotes
+      // recomputes). loadedDetailNoteId always tracks what's in the text area.
+      if (loadedDetailNoteId >= 0 && detailTextArea) {
         var tit = Model.derivedTitle(detailTextArea.text)
-        mgrRoot.saveRequested(mgrRoot.selectedNote.id, tit, detailTextArea.text)
+        mgrRoot.saveRequested(loadedDetailNoteId, tit, detailTextArea.text)
       }
     }
     function toggleTask() {
@@ -919,9 +1299,9 @@ Item {
     id: mgrAutosaveTimer
     interval: 250
     onTriggered: {
-      if (mgrRoot.selectedNote && mgrRoot.selectedNote.id >= 0 && detailTextArea) {
+      if (loadedDetailNoteId >= 0 && detailTextArea) {
         var tit = Model.derivedTitle(detailTextArea.text)
-        mgrRoot.saveRequested(mgrRoot.selectedNote.id, tit, detailTextArea.text)
+        mgrRoot.saveRequested(loadedDetailNoteId, tit, detailTextArea.text)
       }
     }
   }

@@ -319,6 +319,13 @@ function initSql() {
     "  sort_order INTEGER DEFAULT 0,",
     "  created_at INTEGER NOT NULL,",
     "  updated_at INTEGER NOT NULL",
+    ");",
+    "CREATE TABLE IF NOT EXISTS note_history (",
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,",
+    "  note_id INTEGER NOT NULL,",
+    "  title TEXT NOT NULL DEFAULT '',",
+    "  body TEXT NOT NULL DEFAULT '',",
+    "  saved_at INTEGER NOT NULL",
     ");"
   ].join(" ");
 }
@@ -393,6 +400,44 @@ function deleteSql(id) {
   var noteId = parseInt(id, 10);
   if (isNaN(noteId)) noteId = 0;
   return "DELETE FROM notes WHERE id=" + noteId + ";";
+}
+
+// Note version history (rollback): one row per snapshot, pruned to newest N.
+var HISTORY_KEEP = 20;
+
+function insertHistorySql(id, title, body) {
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
+  var now = Math.floor(Date.now() / 1000);
+  return "INSERT INTO note_history (note_id, title, body, saved_at) VALUES (" +
+    noteId + ", " + sqlQuote(title || "") + ", " + sqlQuote(body || "") + ", " + now + ");";
+}
+
+function pruneHistorySql(id, keep) {
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
+  var k = parseInt(keep, 10);
+  if (isNaN(k) || k < 1) k = HISTORY_KEEP;
+  return "DELETE FROM note_history WHERE note_id=" + noteId +
+    " AND rowid NOT IN (SELECT rowid FROM note_history WHERE note_id=" + noteId +
+    " ORDER BY rowid DESC LIMIT " + k + ");";
+}
+
+// Shaped like note rows so parseRows() handles them (id=rowid, note_id kept).
+function selectHistorySql(id) {
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
+  return "SELECT rowid AS id, " + noteId + " AS note_id, title, body, 0 AS color, 0 AS pinned, " +
+    "0 AS archived, 0 AS sort_order, saved_at AS created_at, saved_at AS updated_at " +
+    "FROM note_history WHERE note_id=" + noteId +
+    " ORDER BY saved_at DESC, rowid DESC LIMIT " + HISTORY_KEEP + ";";
+}
+
+// Latest snapshot body per note — used to seed lastSnapBody after restart so
+// we don't create phantom history entries just from reopening the manager.
+function selectLatestHistoryBodiesSql() {
+  return "SELECT note_id, body FROM note_history WHERE rowid IN " +
+    "(SELECT MAX(rowid) FROM note_history GROUP BY note_id);";
 }
 
 function restoreNoteSql(note) {
@@ -536,6 +581,11 @@ if (typeof module !== "undefined" && module.exports) {
     setPinnedSql: setPinnedSql,
     archiveSql: archiveSql,
     deleteSql: deleteSql,
+    HISTORY_KEEP: HISTORY_KEEP,
+    insertHistorySql: insertHistorySql,
+    pruneHistorySql: pruneHistorySql,
+    selectHistorySql: selectHistorySql,
+    selectLatestHistoryBodiesSql: selectLatestHistoryBodiesSql,
     restoreNoteSql: restoreNoteSql,
     parseRows: parseRows,
     ago: ago,
@@ -666,6 +716,22 @@ if (typeof require === "function" && require.main === module) {
   assert.strictEqual(imported[0].title, "Hi");
   assert.strictEqual(imported[0].color, 4);
   assert.strictEqual(imported[0].pinned, 1);
+
+  // Note history (rollback)
+  assert.ok(initSql().indexOf("note_history") !== -1);
+  var hs = insertHistorySql(3, "Title", "Body text");
+  assert.ok(hs.indexOf("note_history") !== -1);
+  assert.ok(hs.indexOf("'Title'") !== -1);
+  var pr = pruneHistorySql(3);
+  assert.ok(pr.indexOf("LIMIT 20") !== -1);
+  assert.ok(pruneHistorySql(3, 5).indexOf("LIMIT 5") !== -1);
+  var sel = selectHistorySql(3);
+  assert.ok(sel.indexOf("note_history") !== -1);
+  assert.ok(sel.indexOf("note_id=3") !== -1);
+  var hrows = parseRows('[{"id":9,"note_id":3,"title":"Old","body":"old body","color":0,"pinned":0,"archived":0,"sort_order":0,"created_at":100,"updated_at":200}]');
+  assert.strictEqual(hrows.length, 1);
+  assert.strictEqual(hrows[0].body, "old body");
+  assert.strictEqual(hrows[0].note_id, 3);
 
   console.log("All NotyModel.js tests passed successfully!");
 }
