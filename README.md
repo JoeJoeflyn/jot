@@ -73,8 +73,13 @@ omarchy-restart-shell
 | **Toggle Pin** | `Ctrl+P` |
 | **Cycle Note Color** | `Ctrl+.` |
 | **Delete Note** | `Ctrl+Backspace` (with 10s floating undo toast) |
-| **Find in Note** | `Ctrl+F` |
-| **Toggle Task / Checkbox** | Click bracket or press `Enter` on task line |
+| **Find / Replace in Note** | `Ctrl+F` (Find) / `Ctrl+H` (Replace) / `F3` (Next) |
+| **Toggle Task / Checkbox** | Click bracket or press `Ctrl+T` |
+| **Indent / Outdent Tasks & Lists** | `Tab` / `Shift+Tab` |
+| **Move Line(s) Up / Down** | `Alt+Up` / `Alt+Down` |
+| **Duplicate Line / Selection** | `Ctrl+Shift+D` |
+| **Delete Current Line** | `Ctrl+Shift+K` |
+| **Bold / Italic / Link** | `Ctrl+B` / `Ctrl+I` / `Ctrl+K` |
 
 ---
 

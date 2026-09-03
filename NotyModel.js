@@ -133,6 +133,12 @@ function isTaskLine(line) {
   return taskMarker(line) !== null;
 }
 
+function taskPrefixLength(line) {
+  var s = String(line || "");
+  var match = s.match(/^(\s*)(\[[✓xXvV ]\]|\u2610\uFE0E?|\u2611\uFE0E?|[-*]\s+\[[ xX]\])\s*/);
+  return match ? match[0].length : 0;
+}
+
 function toggleTaskLine(line) {
   var s = String(line || "");
   var m = taskMarker(s);
@@ -142,7 +148,9 @@ function toggleTaskLine(line) {
   if (m === "done") {
     return s.replace(/^(\s*)(\[[✓xXvV]\]|\u2611\uFE0E?|[-*]\s+\[[xX]\])\s*/, "$1[ ] ");
   }
-  return "[ ] " + s;
+  var leadMatch = s.match(/^(\s*)/);
+  var lead = leadMatch ? leadMatch[1] : "";
+  return lead + TASK_OPEN_PREFIX + s.substring(lead.length);
 }
 
 function stripTask(line) {
@@ -164,12 +172,72 @@ function toggleTaskBlock(text) {
     var l = lines[j];
     if (l.trim() === "") { out.push(l); continue; }
     if (anyNonTask) {
-      out.push(isTaskLine(l) ? l : (TASK_OPEN_PREFIX + l));
+      if (isTaskLine(l)) {
+        out.push(l);
+      } else {
+        var leadMatch = l.match(/^(\s*)/);
+        var lead = leadMatch ? leadMatch[1] : "";
+        out.push(lead + TASK_OPEN_PREFIX + l.substring(lead.length));
+      }
     } else {
       out.push(toggleTaskLine(l));
     }
   }
   return out.join("\n");
+}
+
+function listContinuation(line) {
+  var s = String(line || "");
+  // Check tasks first
+  if (isTaskLine(s)) {
+    var isEmptyTask = stripTask(s).trim() === "";
+    var mTask = s.match(/^(\s*)/);
+    var indentTask = mTask ? mTask[1] : "";
+    return {
+      type: "task",
+      isEmpty: isEmptyTask,
+      indent: indentTask,
+      nextPrefix: "\n" + indentTask + TASK_OPEN_PREFIX
+    };
+  }
+
+  // Check bullet lists: - item, * item, • item
+  var bulletMatch = s.match(/^(\s*)([-*•])\s+(.*)$/);
+  if (bulletMatch) {
+    var indentBullet = bulletMatch[1];
+    var symbol = bulletMatch[2];
+    var content = bulletMatch[3];
+    return {
+      type: "bullet",
+      isEmpty: content.trim() === "",
+      indent: indentBullet,
+      nextPrefix: "\n" + indentBullet + symbol + " "
+    };
+  }
+
+  // Check numbered lists: 1. item, 2. item
+  var numMatch = s.match(/^(\s*)(\d+)([.)])\s+(.*)$/);
+  if (numMatch) {
+    var indentNum = numMatch[1];
+    var num = parseInt(numMatch[2], 10);
+    var delim = numMatch[3];
+    var numContent = numMatch[4];
+    return {
+      type: "ordered",
+      isEmpty: numContent.trim() === "",
+      indent: indentNum,
+      nextPrefix: "\n" + indentNum + (num + 1) + delim + " "
+    };
+  }
+
+  return null;
+}
+
+function wordCount(text) {
+  var s = String(text || "").trim();
+  if (s === "") return 0;
+  var words = s.split(/\s+/);
+  return words.length;
 }
 
 function taskCounts(body) {
@@ -235,7 +303,8 @@ function tasksToMarkdown(text) {
 
 // Safe SQL helpers
 function sqlQuote(s) {
-  return "'" + String(s === null || s === undefined ? "" : s).replace(/'/g, "''") + "'";
+  var str = String(s === null || s === undefined ? "" : s).replace(/\0/g, "");
+  return "'" + str.replace(/'/g, "''") + "'";
 }
 
 function initSql() {
@@ -270,55 +339,75 @@ function reorderNotesSql(idList) {
   if (!Array.isArray(idList)) return "";
   var sql = "";
   for (var i = 0; i < idList.length; i++) {
-    sql += "UPDATE notes SET sort_order=" + i + " WHERE id=" + Number(idList[i]) + ";";
+    var id = parseInt(idList[i], 10);
+    if (!isNaN(id) && id >= 0) {
+      sql += "UPDATE notes SET sort_order=" + i + " WHERE id=" + id + ";";
+    }
   }
   return sql;
 }
 
 function insertSql(title, body, color) {
   var now = Math.floor(Date.now() / 1000);
-  var colIdx = colorIndex(color);
+  var colIdx = parseInt(colorIndex(color), 10);
+  if (isNaN(colIdx)) colIdx = 0;
   var tit = title || derivedTitle(body);
   return "INSERT INTO notes (title, body, color, pinned, archived, sort_order, created_at, updated_at) VALUES (" +
-    sqlQuote(tit) + ", " + sqlQuote(body) + ", " + Number(colIdx) + ", 0, 0, 0, " + now + ", " + now + ");";
+    sqlQuote(tit) + ", " + sqlQuote(body) + ", " + colIdx + ", 0, 0, 0, " + now + ", " + now + ");";
 }
 
 function updateSql(id, title, body) {
   var now = Math.floor(Date.now() / 1000);
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
   var tit = title !== undefined && title !== null ? title : derivedTitle(body);
-  return "UPDATE notes SET title=" + sqlQuote(tit) + ", body=" + sqlQuote(body) + ", updated_at=" + now + " WHERE id=" + Number(id) + ";";
+  return "UPDATE notes SET title=" + sqlQuote(tit) + ", body=" + sqlQuote(body) + ", updated_at=" + now + " WHERE id=" + noteId + ";";
 }
 
 function setColorSql(id, color) {
-  var colIdx = colorIndex(color);
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
+  var colIdx = parseInt(colorIndex(color), 10);
+  if (isNaN(colIdx)) colIdx = 0;
   var now = Math.floor(Date.now() / 1000);
-  return "UPDATE notes SET color=" + Number(colIdx) + ", updated_at=" + now + " WHERE id=" + Number(id) + ";";
+  return "UPDATE notes SET color=" + colIdx + ", updated_at=" + now + " WHERE id=" + noteId + ";";
 }
 
 function setPinnedSql(id, pinned) {
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
   var p = pinned ? 1 : 0;
   var now = Math.floor(Date.now() / 1000);
-  return "UPDATE notes SET pinned=" + p + ", updated_at=" + now + " WHERE id=" + Number(id) + ";";
+  return "UPDATE notes SET pinned=" + p + ", updated_at=" + now + " WHERE id=" + noteId + ";";
 }
 
 function archiveSql(id, archived) {
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
   var a = archived ? 1 : 0;
   var now = Math.floor(Date.now() / 1000);
-  return "UPDATE notes SET archived=" + a + ", updated_at=" + now + " WHERE id=" + Number(id) + ";";
+  return "UPDATE notes SET archived=" + a + ", updated_at=" + now + " WHERE id=" + noteId + ";";
 }
 
 function deleteSql(id) {
-  return "DELETE FROM notes WHERE id=" + Number(id) + ";";
+  var noteId = parseInt(id, 10);
+  if (isNaN(noteId)) noteId = 0;
+  return "DELETE FROM notes WHERE id=" + noteId + ";";
 }
 
 function restoreNoteSql(note) {
   if (!note) return "";
   var now = Math.floor(Date.now() / 1000);
-  var col = colorIndex(note.color);
+  var noteId = parseInt(note.id, 10);
+  if (isNaN(noteId)) noteId = 0;
+  var col = parseInt(colorIndex(note.color), 10);
+  if (isNaN(col)) col = 0;
+  var createdAt = parseInt(note.created_at || now, 10);
+  if (isNaN(createdAt)) createdAt = now;
   return "INSERT INTO notes (id, title, body, color, pinned, archived, created_at, updated_at) VALUES (" +
-    Number(note.id) + ", " + sqlQuote(note.title || "") + ", " + sqlQuote(note.body || "") + ", " +
+    noteId + ", " + sqlQuote(note.title || "") + ", " + sqlQuote(note.body || "") + ", " +
     col + ", " + (note.pinned ? 1 : 0) + ", " + (note.archived ? 1 : 0) + ", " +
-    Number(note.created_at || now) + ", " + now + ");";
+    createdAt + ", " + now + ");";
 }
 
 // Parse sqlite3 -json output safely
@@ -428,6 +517,9 @@ if (typeof module !== "undefined" && module.exports) {
     toggleTaskLine: toggleTaskLine,
     toggleTaskBlock: toggleTaskBlock,
     stripTask: stripTask,
+    taskPrefixLength: taskPrefixLength,
+    listContinuation: listContinuation,
+    wordCount: wordCount,
     taskCounts: taskCounts,
     derivedTitle: derivedTitle,
     displayTitle: displayTitle,
@@ -471,11 +563,44 @@ if (typeof require === "function" && require.main === module) {
   assert.strictEqual(toggleTaskLine("buy milk"), "[ ] buy milk");
   assert.strictEqual(toggleTaskLine("[ ] buy milk"), "[✓] buy milk");
   assert.strictEqual(toggleTaskLine("[✓] buy milk"), "[ ] buy milk");
+  assert.strictEqual(toggleTaskLine("  buy milk"), "  [ ] buy milk");
+  assert.strictEqual(toggleTaskLine("  [ ] buy milk"), "  [✓] buy milk");
   assert.strictEqual(isTaskLine("[ ] hello"), true);
   assert.strictEqual(isTaskLine("[✓] hello"), true);
+  assert.strictEqual(isTaskLine("  [ ] indented"), true);
   assert.strictEqual(isTaskLine("hello"), false);
   assert.strictEqual(stripTask("[ ] hello"), "hello");
   assert.strictEqual(stripTask("[✓] hello"), "hello");
+
+  // Prefix hit testing
+  assert.strictEqual(taskPrefixLength("[ ] hello"), 4);
+  assert.strictEqual(taskPrefixLength("[✓] hello"), 4);
+  assert.strictEqual(taskPrefixLength("  [ ] indented"), 6);
+  assert.strictEqual(taskPrefixLength("- [ ] markdown"), 6);
+  assert.strictEqual(taskPrefixLength("not a task"), 0);
+
+  // List continuation
+  var contTask = listContinuation("  [ ] Task 1");
+  assert.strictEqual(contTask.type, "task");
+  assert.strictEqual(contTask.isEmpty, false);
+  assert.strictEqual(contTask.nextPrefix, "\n  [ ] ");
+
+  var contEmptyTask = listContinuation("  [ ] ");
+  assert.strictEqual(contEmptyTask.isEmpty, true);
+
+  var contBullet = listContinuation("- Bullet item");
+  assert.strictEqual(contBullet.type, "bullet");
+  assert.strictEqual(contBullet.isEmpty, false);
+  assert.strictEqual(contBullet.nextPrefix, "\n- ");
+
+  var contNum = listContinuation("  1. Numbered");
+  assert.strictEqual(contNum.type, "ordered");
+  assert.strictEqual(contNum.nextPrefix, "\n  2. ");
+
+  // Word count
+  assert.strictEqual(wordCount(""), 0);
+  assert.strictEqual(wordCount("hello world"), 2);
+  assert.strictEqual(wordCount("  one   two  three  "), 3);
 
   // Multi-line block toggle
   var block1 = "Catsset idea\nCar on border\nHover preview";

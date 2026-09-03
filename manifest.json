@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jot",
   "name": "Jot",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "JoeJoeflyn",
   "license": "MIT",
   "description": "Minimalist sticky notes living seamlessly at the edge of your screen. Hover to fan out, click to write, drag to reorder, with instant search and archive manager.",

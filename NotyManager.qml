@@ -787,11 +787,14 @@ Item {
                       if (lineEnd === -1) lineEnd = text.length
                       var line = text.substring(lineStart, lineEnd)
 
-                      if (Model.isTaskLine(line) && pos <= lineStart + 3) {
+                      var pLen = Model.taskPrefixLength(line)
+                      if (pLen > 0 && pos >= lineStart && pos <= lineStart + pLen) {
+                        var savedY = detailScroll.contentItem ? detailScroll.contentItem.contentY : 0
                         var toggled = Model.toggleTaskLine(line)
-                        var next = text.substring(0, lineStart) + toggled + text.substring(lineEnd)
-                        detailTextArea.text = next
-                        detailTextArea.cursorPosition = pos
+                        detailTextArea.remove(lineStart, lineEnd)
+                        detailTextArea.insert(lineStart, toggled)
+                        detailTextArea.cursorPosition = Math.min(detailTextArea.text.length, pos + (toggled.length - line.length))
+                        if (detailScroll.contentItem) detailScroll.contentItem.contentY = savedY
                         mgrAutosaveTimer.restart()
                         mouse.accepted = true
                         return
@@ -811,19 +814,25 @@ Item {
                         if (lineEnd === -1) lineEnd = full.length
                         var line = full.substring(lineStart, lineEnd)
 
-                        if (Model.isTaskLine(line)) {
-                          if (Model.stripTask(line).trim() === "") {
-                            var cleared = full.substring(0, lineStart) + full.substring(lineEnd)
-                            detailTextArea.text = cleared
-                            detailTextArea.cursorPosition = lineStart
+                        var cont = Model.listContinuation(line)
+                        if (cont) {
+                          var savedY = detailScroll.contentItem ? detailScroll.contentItem.contentY : 0
+                          if (cont.isEmpty) {
+                            if (cont.indent.length >= 2) {
+                              detailTextArea.remove(lineStart, lineStart + 2)
+                              detailTextArea.cursorPosition = Math.max(lineStart, cur - 2)
+                            } else {
+                              detailTextArea.remove(lineStart, lineEnd)
+                              detailTextArea.cursorPosition = lineStart
+                            }
+                            if (detailScroll.contentItem) detailScroll.contentItem.contentY = savedY
                             mgrAutosaveTimer.restart()
                             event.accepted = true
                             return
                           }
-                          var insert = "\n" + Model.TASK_OPEN_PREFIX
-                          var next = full.substring(0, cur) + insert + full.substring(cur)
-                          detailTextArea.text = next
-                          detailTextArea.cursorPosition = cur + insert.length
+                          detailTextArea.insert(cur, cont.nextPrefix)
+                          detailTextArea.cursorPosition = cur + cont.nextPrefix.length
+                          if (detailScroll.contentItem) detailScroll.contentItem.contentY = savedY
                           mgrAutosaveTimer.restart()
                           event.accepted = true
                           return
@@ -845,8 +854,10 @@ Item {
                         if (converted !== after) {
                           var curPos = detailTextArea.cursorPosition
                           var newCursor = Model.tasksFromMarkdown(after.substring(0, curPos)).length
+                          var savedY = detailScroll.contentItem ? detailScroll.contentItem.contentY : 0
                           detailTextArea.text = converted
                           detailTextArea.cursorPosition = newCursor
+                          if (detailScroll.contentItem) detailScroll.contentItem.contentY = savedY
                           mgrAutosaveTimer.restart()
                         }
                       })
@@ -874,6 +885,7 @@ Item {
       var full = detailTextArea.text
       var selStart = detailTextArea.selectionStart
       var selEnd = detailTextArea.selectionEnd
+      var savedY = detailScroll.contentItem ? detailScroll.contentItem.contentY : 0
 
       if (selEnd > selStart) {
         var lineStart = full.lastIndexOf("\n", Math.max(0, selStart - 1)) + 1
@@ -881,9 +893,10 @@ Item {
         if (lineEnd === -1) lineEnd = full.length
         var block = full.substring(lineStart, lineEnd)
         var newBlock = Model.toggleTaskBlock(block)
-        var next = full.substring(0, lineStart) + newBlock + full.substring(lineEnd)
-        detailTextArea.text = next
+        detailTextArea.remove(lineStart, lineEnd)
+        detailTextArea.insert(lineStart, newBlock)
         detailTextArea.select(lineStart, lineStart + newBlock.length)
+        if (detailScroll.contentItem) detailScroll.contentItem.contentY = savedY
         mgrAutosaveTimer.restart()
         return
       }
@@ -894,9 +907,10 @@ Item {
       if (le === -1) le = full.length
       var line = full.substring(ls, le)
       var toggled = Model.toggleTaskLine(line)
-      var next = full.substring(0, ls) + toggled + full.substring(le)
-      detailTextArea.text = next
-      detailTextArea.cursorPosition = Math.min(next.length, cur + (toggled.length - line.length))
+      detailTextArea.remove(ls, le)
+      detailTextArea.insert(ls, toggled)
+      detailTextArea.cursorPosition = Math.min(detailTextArea.text.length, cur + (toggled.length - line.length))
+      if (detailScroll.contentItem) detailScroll.contentItem.contentY = savedY
       mgrAutosaveTimer.restart()
     }
   }

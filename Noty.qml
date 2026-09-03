@@ -93,7 +93,7 @@ Item {
       noteFontSize: root.noteFontSize,
       deckVisible: root.deckVisible
     }
-    settingsWriteProc.command = ["bash", "-c", "mkdir -p " + JSON.stringify(dbDir) + " && cat << 'EOF' > " + JSON.stringify(settingsPath) + "\n" + JSON.stringify(s, null, 2) + "\nEOF"]
+    settingsWriteProc.command = ["bash", "-c", 'mkdir -p -m 700 "$1" && printf "%s" "$2" > "$3" && chmod 600 "$3"', "_", dbDir, JSON.stringify(s, null, 2), settingsPath]
     settingsWriteProc.running = true
   }
 
@@ -196,23 +196,24 @@ Item {
   }
 
   function initDatabase() {
-    var initCommands = [
-      "mkdir -p " + JSON.stringify(dbDir),
-      "sqlite3 " + JSON.stringify(dbPath) + " " + JSON.stringify(Model.initSql()),
-      // Migrate legacy string colors if present
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=0 WHERE color='yellow' OR color='lemon';\"",
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=1 WHERE color='peach';\"",
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=2 WHERE color='rose';\"",
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=3 WHERE color='lilac';\"",
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=4 WHERE color='sky';\"",
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=5 WHERE color='mint';\"",
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=6 WHERE color='sand';\"",
-      "sqlite3 " + JSON.stringify(dbPath) + " \"UPDATE notes SET color=7 WHERE color='slate';\""
+    var initScript = [
+      'mkdir -p -m 700 "$1"',
+      'chmod 700 "$1"',
+      'sqlite3 "$2" "$3"',
+      'chmod 600 "$2"',
+      'sqlite3 "$2" "UPDATE notes SET color=0 WHERE color=\'yellow\' OR color=\'lemon\';"',
+      'sqlite3 "$2" "UPDATE notes SET color=1 WHERE color=\'peach\';"',
+      'sqlite3 "$2" "UPDATE notes SET color=2 WHERE color=\'rose\';"',
+      'sqlite3 "$2" "UPDATE notes SET color=3 WHERE color=\'lilac\';"',
+      'sqlite3 "$2" "UPDATE notes SET color=4 WHERE color=\'sky\';"',
+      'sqlite3 "$2" "UPDATE notes SET color=5 WHERE color=\'mint\';"',
+      'sqlite3 "$2" "UPDATE notes SET color=6 WHERE color=\'sand\';"',
+      'sqlite3 "$2" "UPDATE notes SET color=7 WHERE color=\'slate\';"'
     ].join(" && ")
 
     root.reloadPending = true
     root.writeInFlight = true
-    dbWrite.command = ["bash", "-c", initCommands]
+    dbWrite.command = ["bash", "-c", initScript, "_", dbDir, dbPath, Model.initSql()]
     dbWrite.running = true
   }
 
@@ -276,6 +277,10 @@ Item {
     return currentActiveNote ? (currentActiveNote.pinned === 1) : false
   }
 
+  function fanActivity() {
+    fanIdleTimer.restart()
+  }
+
   // Idle Timers matching Noty
   Timer {
     id: fanIdleTimer
@@ -311,6 +316,14 @@ Item {
   }
 
   function saveNote(id, title, body) {
+    for (var i = 0; i < root.activeNotes.length; i++) {
+      if (root.activeNotes[i].id === id) {
+        root.activeNotes[i].title = title
+        root.activeNotes[i].body = body
+        root.activeNotes[i].updated_at = Math.floor(Date.now() / 1000)
+        break
+      }
+    }
     runWrite(Model.updateSql(id, title, body))
   }
 
@@ -404,6 +417,22 @@ Item {
     }
   }
 
+  Process {
+    id: importReadProc
+    stdout: StdioCollector {
+      id: importCollector
+      waitForEnd: true
+      onStreamFinished: {
+        if (importCollector.text) {
+          var imported = Model.parseStickiesJson(importCollector.text)
+          for (var i = 0; i < imported.length; i++) {
+            runWriteReload(Model.insertSql(imported[i].title, imported[i].body, imported[i].color))
+          }
+        }
+      }
+    }
+  }
+
   function exportNotes(format) {
     var exportDir = root.home + "/Documents/Noty-Export"
     var dateStamp = new Date().toISOString().replace(/[:.]/g, "-")
@@ -411,47 +440,44 @@ Item {
     if (format === "stickies_json") {
       var jsonStr = Model.exportStickiesJson(root.notes)
       var filePath = exportDir + "/Noty-Archive-" + dateStamp + ".stickies"
-      exportImportProc.command = ["bash", "-c", "mkdir -p " + JSON.stringify(exportDir) + " && cat << 'EOF' > " + JSON.stringify(filePath) + "\n" + jsonStr + "\nEOF"]
+      exportImportProc.command = ["bash", "-c", 'mkdir -p -m 700 "$1" && printf "%s" "$2" > "$3" && chmod 600 "$3"', "_", exportDir, jsonStr, filePath]
       exportImportProc.running = true
     } else if (format === "single_md") {
       var mdStr = Model.exportSingleMarkdown(root.notes)
       var filePath = exportDir + "/All-Notes-" + dateStamp + ".md"
-      exportImportProc.command = ["bash", "-c", "mkdir -p " + JSON.stringify(exportDir) + " && cat << 'EOF' > " + JSON.stringify(filePath) + "\n" + mdStr + "\nEOF"]
+      exportImportProc.command = ["bash", "-c", 'mkdir -p -m 700 "$1" && printf "%s" "$2" > "$3" && chmod 600 "$3"', "_", exportDir, mdStr, filePath]
       exportImportProc.running = true
     } else if (format === "markdown_zip" || format === "text_zip") {
       var folder = exportDir + "/Notes-" + dateStamp
-      var script = "mkdir -p " + JSON.stringify(folder) + "\n"
+      var cmd = ["bash", "-c", 'mkdir -p -m 700 "$1"; shift; while (( $# >= 2 )); do printf "%s" "$2" > "$1" && chmod 600 "$1"; shift 2; done', "_", folder]
       for (var i = 0; i < root.notes.length; i++) {
         var n = root.notes[i]
-        var fname = (Model.displayTitle(n).replace(/[\/\\?%*:|"<>]/g, "_") || ("Note-" + n.id)) + (format === "markdown_zip" ? ".md" : ".txt")
+        var safeTitle = Model.displayTitle(n)
+          .replace(/[^\w\s\d\-_.()]/g, "_")
+          .replace(/^\.+/, "")
+          .trim()
+          .substring(0, 80)
+        if (!safeTitle) safeTitle = "Note-" + n.id
+        var fname = safeTitle + (format === "markdown_zip" ? ".md" : ".txt")
         var content = format === "markdown_zip" ? Model.tasksToMarkdown(n.body) : n.body
-        script += "cat << 'EOF' > " + JSON.stringify(folder + "/" + fname) + "\n" + content + "\nEOF\n"
+        cmd.push(folder + "/" + fname, content)
       }
-      exportImportProc.command = ["bash", "-c", script]
+      exportImportProc.command = cmd
       exportImportProc.running = true
     }
   }
 
   function importNotes() {
     var script = [
-      "if [ -d \"$HOME/Documents/Noty-Export\" ]; then",
-      "  for f in \"$HOME/Documents/Noty-Export\"/*.stickies; do",
-      "    [ -f \"$f\" ] && cat \"$f\" && break",
-      "  done",
-      "fi"
+      'if [ -d "$1" ]; then',
+      '  for f in "$1"/*.stickies; do',
+      '    [ -f "$f" ] && cat "$f" && break',
+      '  done',
+      'fi'
     ].join("\n")
 
-    var proc = Qt.createQmlObject('import Quickshell.Io; Process { property string out: ""; stdout: StdioCollector { onStreamFinished: proc.out = text } }', root)
-    proc.command = ["bash", "-c", script]
-    proc.onExited = function(code) {
-      if (code === 0 && proc.out) {
-        var imported = Model.parseStickiesJson(proc.out)
-        for (var i = 0; i < imported.length; i++) {
-          runWriteReload(Model.insertSql(imported[i].title, imported[i].body, imported[i].color))
-        }
-      }
-    }
-    proc.running = true
+    importReadProc.command = ["bash", "-c", script, "_", root.home + "/Documents/Noty-Export"]
+    importReadProc.running = true
   }
 
   // ------------------------------------------------------- MULTI-SCREEN DECKS
@@ -1174,11 +1200,15 @@ Item {
       } else if (p.action === "new") {
         root.newNote()
       } else if (p.action === "expand" || p.id !== undefined) {
-        var targetId = parseInt(p.id || "1")
-        console.log("NOTY EXPANDING NOTE ID:", targetId)
-        root.expandNote(targetId, -1)
+        var targetId = parseInt(p.id || "1", 10)
+        if (!isNaN(targetId) && targetId >= 0) {
+          root.expandNote(targetId, -1)
+        }
       } else if (p.action === "export") {
-        root.exportNotes(p.format || "markdown_zip")
+        var fmt = String(p.format || "markdown_zip")
+        if (fmt === "stickies_json" || fmt === "single_md" || fmt === "markdown_zip" || fmt === "text_zip") {
+          root.exportNotes(fmt)
+        }
       } else {
         root.deckState = "fan"
         fanIdleTimer.restart()
@@ -1188,8 +1218,10 @@ Item {
     }
 
     function expand(noteIdStr: string): string {
-      var nid = parseInt(noteIdStr || "1")
-      root.expandNote(nid, -1)
+      var nid = parseInt(noteIdStr || "1", 10)
+      if (!isNaN(nid) && nid >= 0) {
+        root.expandNote(nid, -1)
+      }
       return "ok"
     }
 
