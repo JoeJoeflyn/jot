@@ -119,10 +119,15 @@ Item {
   }
 
   function refreshDetail() {
-    var n = selectedNote
-    if (n && detailTextArea) {
-      loadedDetailNoteId = n.id
-      detailTextArea.text = n.body || ""
+    if (selectedNoteId >= 0 && detailTextArea) {
+      var n = null
+      for (var i = 0; i < notesList.length; i++) {
+        if (notesList[i].id === selectedNoteId) { n = notesList[i]; break }
+      }
+      if (n) {
+        loadedDetailNoteId = n.id
+        detailTextArea.text = n.body || ""
+      }
     }
     historyList = []
     historyOpen = false
@@ -913,7 +918,7 @@ Item {
                   background: Rectangle { color: "transparent" }
 
                   onTextChanged: {
-                    if (mgrRoot.selectedNote && mgrRoot.selectedNote.id >= 0) {
+                    if (loadedDetailNoteId >= 0) {
                       mgrAutosaveTimer.restart()
                     }
                   }

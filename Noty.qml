@@ -182,9 +182,7 @@ Item {
   }
 
   function loadNotes(done) {
-    console.log("NOTY loadNotes called")
     runSelect(Model.selectAllSql(), function(rows) {
-      console.log("NOTY loadNotes rows=" + rows.length)
       root.notes = rows
       var act = []
       var arch = []
