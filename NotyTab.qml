@@ -140,6 +140,7 @@ Item {
 
       Text {
         id: titleText
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: tab.labelText
         color: isMoreTab
@@ -175,6 +176,7 @@ Item {
 
     // Compact mode "+N" text
     Text {
+      textFormat: Text.PlainText
       visible: isCompact && isMoreTab
       anchors.centerIn: parent
       text: "+" + moreCount
@@ -248,8 +250,16 @@ Item {
     }
 
     PanelToolTip {
+      id: tabTip
       visible: !tab.isMoreTab && tab.note && hitArea.containsMouse && !hitArea.drag.active
       text: (tab.note ? Model.displayTitle(tab.note) : "") + " (Drag up/down to reorder)"
+      contentItem: Text {
+        text: tabTip.text
+        textFormat: Text.PlainText
+        color: tabTip.panelForeground
+        font.family: tabTip.fontFamily
+        font.pixelSize: tabTip.fontSize
+      }
     }
   }
 }

@@ -462,6 +462,7 @@ function parseRows(text) {
   try {
     var v = JSON.parse(s);
     if (!Array.isArray(v)) return [];
+    if (v.length > 500) v = v.slice(0, 500);
     // Normalize row fields
     for (var i = 0; i < v.length; i++) {
       var r = v[i];
@@ -472,8 +473,8 @@ function parseRows(text) {
       r.sort_order = Number(r.sort_order || 0);
       r.created_at = Number(r.created_at || 0);
       r.updated_at = Number(r.updated_at || 0);
-      r.title = String(r.title || "");
-      r.body = String(r.body || "").replace(/\\n/g, "\n");
+      r.title = String(r.title || "").replace(/\0/g, "").substring(0, 200);
+      r.body = String(r.body || "").replace(/\\n/g, "\n").replace(/\0/g, "").substring(0, 131072);
     }
     return v;
   } catch (e) {
@@ -497,10 +498,10 @@ function ago(timestamp) {
 // Export / Import formats
 function exportStickiesJson(notes) {
   var list = Array.isArray(notes) ? notes : [];
-  var out = list.map(function(n) {
+  var out = list.slice(0, 500).map(function(n) {
     return {
-      title: n.title || "",
-      body: n.body || "",
+      title: String(n.title || "").replace(/\0/g, "").substring(0, 200),
+      body: String(n.body || "").replace(/\0/g, "").substring(0, 131072),
       color: colorIndex(n.color),
       pinned: n.pinned === 1,
       archived: n.archived === 1,
@@ -513,7 +514,7 @@ function exportStickiesJson(notes) {
 
 function exportSingleMarkdown(notes) {
   var list = Array.isArray(notes) ? notes : [];
-  var chunks = list.map(function(n) {
+  var chunks = list.slice(0, 500).map(function(n) {
     var tit = displayTitle(n);
     var col = colorByIndex(n.color).name;
     var dt = n.updated_at ? new Date(n.updated_at * 1000).toLocaleString() : "";
@@ -528,10 +529,11 @@ function parseStickiesJson(jsonStr) {
     var obj = JSON.parse(jsonStr);
     var rawNotes = obj.notes || (Array.isArray(obj) ? obj : []);
     if (!Array.isArray(rawNotes)) return [];
+    if (rawNotes.length > 200) rawNotes = rawNotes.slice(0, 200);
     return rawNotes.map(function(n) {
       return {
-        title: String(n.title || derivedTitle(n.body)),
-        body: String(n.body || ""),
+        title: String(n.title || derivedTitle(n.body)).replace(/\0/g, "").substring(0, 200),
+        body: String(n.body || "").replace(/\0/g, "").substring(0, 131072),
         color: colorIndex(n.color),
         pinned: n.pinned ? 1 : 0,
         archived: n.archived ? 1 : 0

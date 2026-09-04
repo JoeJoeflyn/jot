@@ -3,6 +3,7 @@
 > Minimalist sticky notes living seamlessly at the edge of your screen for Omarchy / Hyprland. Inspired by macOS Noty.
 
 ![Jot Preview](preview.png)
+<img width="960" height="540" alt="screenrecording-2026-08-31_02-47-50" src="https://github.com/user-attachments/assets/95c8ef29-4880-463e-befd-2e5049839fdb" />
 
 ## ✨ Features
 

@@ -493,6 +493,7 @@ Item {
 
                   // Title
                   Text {
+                    textFormat: Text.PlainText
                     text: Model.displayTitle(modelData)
                     color: mgrRoot.selectedNoteId === modelData.id ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.85)
                     font.family: Style.font.family
@@ -508,6 +509,7 @@ Item {
                     spacing: 6
 
                     Text {
+                      textFormat: Text.PlainText
                       text: Model.ago(modelData.updated_at)
                       color: Qt.rgba(1, 1, 1, 0.45)
                       font.family: Style.font.family
@@ -526,6 +528,7 @@ Item {
 
                       Text {
                         id: taskCountLabel
+                        textFormat: Text.PlainText
                         anchors.centerIn: parent
                         text: (noteRow.counts.done === noteRow.counts.total ? "✓ " : "") +
                               noteRow.counts.done + "/" + noteRow.counts.total
@@ -538,6 +541,7 @@ Item {
 
                     // Preview Snippet
                     Text {
+                      textFormat: Text.PlainText
                       visible: text !== ""
                       text: Model.notePreview(modelData.body)
                       color: Qt.rgba(1, 1, 1, 0.35)
@@ -1190,6 +1194,7 @@ Item {
                         spacing: 2
 
                         Text {
+                          textFormat: Text.PlainText
                           text: Model.displayTitle(modelData)
                           color: "#FFFFFF"
                           font.family: Style.font.family
@@ -1202,12 +1207,14 @@ Item {
                           width: parent.width
                           spacing: 6
                           Text {
+                            textFormat: Text.PlainText
                             text: Model.ago(modelData.updated_at)
                             color: Qt.rgba(1, 1, 1, 0.40)
                             font.family: Style.font.family
                             font.pixelSize: 10
                           }
                           Text {
+                            textFormat: Text.PlainText
                             visible: text !== ""
                             text: Model.notePreview(modelData.body)
                             color: Qt.rgba(1, 1, 1, 0.35)

@@ -114,6 +114,7 @@ Item {
 
         Text {
           id: titleLabel
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           text: Model.displayTitle({
             title: (editorRoot.note && editorRoot.note.title) || "",
@@ -129,6 +130,7 @@ Item {
 
         Text {
           id: savedLabel
+          textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
           text: autosaveTimer.running ? "Saving…" : ("Saved · " + Model.ago(editorRoot.lastSavedTime || (editorRoot.note ? editorRoot.note.updated_at : 0)))
           color: Qt.rgba(
@@ -744,8 +746,16 @@ Item {
               onClicked: editorRoot.colorChanged(editorRoot.note.id, index)
 
               PanelToolTip {
+                id: swatchTip
                 visible: swatchMouse.containsMouse
                 text: modelData.name + " note"
+                contentItem: Text {
+                  text: swatchTip.text
+                  textFormat: Text.PlainText
+                  color: swatchTip.panelForeground
+                  font.family: swatchTip.fontFamily
+                  font.pixelSize: swatchTip.fontSize
+                }
               }
             }
           }
@@ -761,6 +771,7 @@ Item {
           readonly property int words: noteTextArea ? Model.wordCount(noteTextArea.text) : 0
 
           Text {
+            textFormat: Text.PlainText
             visible: parent.counts.total > 0
             text: (parent.counts.done === parent.counts.total ? "☑ " : "☐ ") + parent.counts.done + "/" + parent.counts.total
             font.family: editorRoot.fontFamily !== "" ? editorRoot.fontFamily : Style.font.family
@@ -770,6 +781,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: parent.counts.total > 0 && parent.words > 0
             text: "·"
             font.pixelSize: 10
@@ -777,6 +789,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: parent.words > 0
             text: parent.words + (parent.words === 1 ? " word" : " words")
             font.family: editorRoot.fontFamily !== "" ? editorRoot.fontFamily : Style.font.family
@@ -833,6 +846,8 @@ Item {
 
       // Rotated Title
       Text {
+        id: rotatedTitle
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: Model.displayTitle({
           title: (editorRoot.note && editorRoot.note.title) || "",
@@ -1502,8 +1517,16 @@ Item {
     }
 
     PanelToolTip {
+      id: vecTip
       visible: vecBtn.toolTipText !== "" && vecMouse.containsMouse
       text: vecBtn.toolTipText
+      contentItem: Text {
+        text: vecTip.text
+        textFormat: Text.PlainText
+        color: vecTip.panelForeground
+        font.family: vecTip.fontFamily
+        font.pixelSize: vecTip.fontSize
+      }
     }
   }
 }

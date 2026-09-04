@@ -68,21 +68,137 @@ Item {
   // Pending delete for 10s undo toast
   property var pendingDeletedNote: null
 
+  // ----------------------------------------------------------------- Subprocess IO
+  // Single serialized IO processor avoiding overlapping Process reuse, command
+  // clobbering, and shell interpolation. Communicates with descriptor-safe helper
+  // scripts/jot-io over stdin/stdout with strict timeouts, caps, and process reaping.
+
+  readonly property string helperPath: {
+    var p = Qt.resolvedUrl("scripts/jot-io").toString()
+    if (p.indexOf("file://") === 0) p = p.substring(7)
+    return p
+  }
+
+  property var ioQueue: []
+  property bool ioInFlight: false
+  property var currentIoItem: null
+
+  Timer {
+    id: ioWatchdog
+    interval: 8000
+    repeat: false
+    onTriggered: {
+      if (ioProc.running) {
+        console.warn("[Jot] IO operation timed out after 8s, reaping process")
+        root.reapIoProcess()
+      }
+    }
+  }
+
+  function reapIoProcess() {
+    ioWatchdog.stop()
+    if (ioProc.running) {
+      try { ioProc.signal(15) } catch (e) {} // SIGTERM
+      ioProc.running = false
+    }
+    ioInFlight = false
+    var item = currentIoItem
+    currentIoItem = null
+    if (item && typeof item.cb === "function") {
+      try { item.cb(null) } catch (e) {}
+    }
+    Qt.callLater(drainIoQueue)
+  }
+
+  Process {
+    id: ioProc
+    stdinEnabled: true
+    stdout: StdioCollector {
+      id: ioCollector
+      waitForEnd: true
+    }
+    onStarted: {
+      if (root.currentIoItem && root.currentIoItem.payload !== undefined && root.currentIoItem.payload !== null) {
+        var payloadStr = typeof root.currentIoItem.payload === "string"
+          ? root.currentIoItem.payload
+          : JSON.stringify(root.currentIoItem.payload)
+        ioProc.write(payloadStr + "\n")
+      }
+    }
+    onExited: function(code) {
+      ioWatchdog.stop()
+      var item = root.currentIoItem
+      root.currentIoItem = null
+      root.ioInFlight = false
+
+      var success = (code === 0)
+      var parsed = null
+      if (success && ioCollector.text) {
+        try {
+          var trimmed = ioCollector.text.trim()
+          if (trimmed.length > 0 && trimmed.length <= 2 * 1024 * 1024) {
+            parsed = JSON.parse(trimmed)
+          }
+        } catch (e) {
+          success = false
+        }
+      }
+
+      if (item) {
+        if (typeof item.cb === "function") {
+          try { item.cb(success ? parsed : null) } catch (e) { console.error(e) }
+        }
+        if (success && item.reload) {
+          // Bounded reload only after confirmed successful write
+          root.loadNotes(item.reloadCb)
+        }
+      }
+
+      root.drainIoQueue()
+    }
+  }
+
+  function enqueueIo(op, args, payload, reload, cb, reloadCb) {
+    root.ioQueue.push({
+      op: op,
+      args: args || [],
+      payload: payload,
+      reload: !!reload,
+      cb: cb || null,
+      reloadCb: reloadCb || null
+    })
+    root.drainIoQueue()
+  }
+
+  function drainIoQueue() {
+    if (root.ioInFlight || root.ioQueue.length === 0) return
+    var item = root.ioQueue.shift()
+    root.currentIoItem = item
+    root.ioInFlight = true
+    ioWatchdog.restart()
+
+    var cmd = ["python3", root.helperPath, item.op]
+    for (var i = 0; i < item.args.length; i++) {
+      cmd.push(String(item.args[i]))
+    }
+    ioProc.command = cmd
+    ioProc.running = true
+  }
+
   // ----------------------------------------------------------------- Settings
 
-  FileView {
-    id: settingsFile
-    path: root.settingsPath
-    onLoaded: {
-      try {
-        var s = JSON.parse(text || "{}")
+  function loadSettings(cb) {
+    enqueueIo("read-settings", [root.settingsPath], null, false, function(res) {
+      if (res && res.settings) {
+        var s = res.settings
         if (s.onRight !== undefined) root.onRight = s.onRight
         if (s.deckStyle !== undefined) root.deckStyle = s.deckStyle
         if (s.noteFont !== undefined) root.noteFont = s.noteFont
         if (s.noteFontSize !== undefined) root.noteFontSize = s.noteFontSize
         if (s.deckVisible !== undefined) root.deckVisible = s.deckVisible
-      } catch (e) {}
-    }
+      }
+      if (typeof cb === "function") cb()
+    })
   }
 
   function saveSettings() {
@@ -93,96 +209,22 @@ Item {
       noteFontSize: root.noteFontSize,
       deckVisible: root.deckVisible
     }
-    settingsWriteProc.command = ["bash", "-c", 'mkdir -p -m 700 "$1" && printf "%s" "$2" > "$3" && chmod 600 "$3"', "_", dbDir, JSON.stringify(s, null, 2), settingsPath]
-    settingsWriteProc.running = true
+    enqueueIo("write-settings", [root.settingsPath], s, false, null)
   }
-
-  Process { id: settingsWriteProc }
 
   // ----------------------------------------------------------------- Database
 
-  property var pendingRowsCallback: null
-
-  Process {
-    id: dbRead
-    stdout: StdioCollector {
-      id: readOut
-      waitForEnd: true
-      onStreamFinished: {
-        var rows = Model.parseRows(readOut.text)
-        var cb = root.pendingRowsCallback
-        root.pendingRowsCallback = null
-        if (typeof cb === "function") cb(rows)
-      }
-    }
-    onExited: function(code) {
-      if (code !== 0) root.pendingRowsCallback = null
-    }
-  }
-
-  function runSelect(sql, cb) {
-    root.pendingRowsCallback = cb
-    dbRead.command = ["sqlite3", "-json", dbPath, sql]
-    dbRead.running = true
-  }
-
-  // Serialized write queue — prevents overlapping sqlite3 invocations from
-  // racing the single dbWrite Process (command overwrite / dropped writes /
-  // reload flag cleared by the wrong onExited). Each entry is { sql, reload }.
-  property var writeQueue: []
-  property bool writeInFlight: false
-  property bool reloadPending: false
-  property var reloadCallback: null
-
-  function drainWriteQueue() {
-    if (root.writeInFlight || root.writeQueue.length === 0) return
-    var next = root.writeQueue.shift()
-    root.writeInFlight = true
-    if (next.reload) root.reloadPending = true
-    dbWrite.command = ["sqlite3", dbPath, next.sql]
-    dbWrite.running = true
-  }
-
-  function runWrite(sql) {
-    root.writeQueue.push({ sql: sql, reload: false })
-    root.drainWriteQueue()
-  }
-
-  function runWriteReload(sql) {
-    root.writeQueue.push({ sql: sql, reload: true })
-    root.drainWriteQueue()
-  }
-
-  function runWriteReloadCb(sql, cb) {
-    root.reloadCallback = cb
-    root.writeQueue.push({ sql: sql, reload: true })
-    root.drainWriteQueue()
-  }
-
-  Process {
-    id: dbWrite
-    stdout: StdioCollector { id: writeOut; waitForEnd: true }
-    onExited: function(code) {
-      root.writeInFlight = false
-      if (root.writeQueue.length > 0) {
-        root.drainWriteQueue()
-      } else {
-        if (root.reloadPending) {
-          root.reloadPending = false
-          loadNotes(function() {
-            if (root.reloadCallback) {
-              var cb = root.reloadCallback
-              root.reloadCallback = null
-              cb()
-            }
-          })
-        }
-      }
-    }
+  function initDatabase() {
+    enqueueIo("init-db", [root.dbPath], null, true, null)
   }
 
   function loadNotes(done) {
-    runSelect(Model.selectAllSql(), function(rows) {
+    enqueueIo("load-notes", [root.dbPath], null, false, function(res) {
+      if (!res || !res.notes) {
+        if (typeof done === "function") done()
+        return
+      }
+      var rows = res.notes
       root.notes = rows
       var act = []
       var arch = []
@@ -206,41 +248,23 @@ Item {
         if (!found) root.collapseToFan()
       }
 
-      // Seed lastSnapBody from DB so restarts don't create phantom history.
-      // Runs after the main callback so we don't clobber pendingRowsCallback.
-      if (typeof done === "function") done()
-      runSelect(Model.selectLatestHistoryBodiesSql(), function(histRows) {
-        for (var h = 0; h < histRows.length; h++) {
-          root.lastSnapBody[histRows[h].note_id] = String(histRows[h].body || "")
+      if (res.history_bodies) {
+        for (var nid in res.history_bodies) {
+          root.lastSnapBody[nid] = String(res.history_bodies[nid] || "")
         }
-      })
+      }
+      if (typeof done === "function") done()
     })
   }
 
-  function initDatabase() {
-    var initScript = [
-      'mkdir -p -m 700 "$1"',
-      'chmod 700 "$1"',
-      'sqlite3 "$2" "$3"',
-      'chmod 600 "$2"',
-      'sqlite3 "$2" "UPDATE notes SET color=0 WHERE color=\'yellow\' OR color=\'lemon\';"',
-      'sqlite3 "$2" "UPDATE notes SET color=1 WHERE color=\'peach\';"',
-      'sqlite3 "$2" "UPDATE notes SET color=2 WHERE color=\'rose\';"',
-      'sqlite3 "$2" "UPDATE notes SET color=3 WHERE color=\'lilac\';"',
-      'sqlite3 "$2" "UPDATE notes SET color=4 WHERE color=\'sky\';"',
-      'sqlite3 "$2" "UPDATE notes SET color=5 WHERE color=\'mint\';"',
-      'sqlite3 "$2" "UPDATE notes SET color=6 WHERE color=\'sand\';"',
-      'sqlite3 "$2" "UPDATE notes SET color=7 WHERE color=\'slate\';"'
-    ].join(" && ")
-
-    root.reloadPending = true
-    root.writeInFlight = true
-    dbWrite.command = ["bash", "-c", initScript, "_", dbDir, dbPath, Model.initSql()]
-    dbWrite.running = true
+  Component.onCompleted: {
+    loadSettings(function() {
+      initDatabase()
+    })
   }
 
-  Component.onCompleted: {
-    initDatabase()
+  Component.onDestruction: {
+    reapIoProcess()
   }
 
   // ----------------------------------------------------------- State Machine
@@ -326,14 +350,10 @@ Item {
   // ------------------------------------------------------------- CRUD Actions
 
   function newNote() {
-    var sql = Model.insertSql("", "", 0) + " SELECT last_insert_rowid();"
-    runSelect(sql, function(rows) {
-      loadNotes()
-      if (rows && rows.length > 0) {
-        var newId = rows[0]["last_insert_rowid()"] || rows[0].id
-        if (newId) {
-          Qt.callLater(function() { root.expandNote(newId, 0) })
-        }
+    enqueueIo("db-write", [root.dbPath], { op: "insert", title: "", body: "", color: 0 }, true, function(res) {
+      if (res && res.id) {
+        var newId = res.id
+        Qt.callLater(function() { root.expandNote(newId, 0) })
       }
     })
   }
@@ -357,7 +377,7 @@ Item {
     root.notes = root.notes.slice()
     root.activeNotes = root.activeNotes.slice()
     root.archivedNotes = root.archivedNotes.slice()
-    runWrite(Model.updateSql(id, title, body))
+    enqueueIo("db-write", [root.dbPath], { op: "update", id: id, title: title, body: body }, false, null)
   }
 
   // Note version history (rollback). Snapshots the pre-edit version when a
@@ -371,15 +391,21 @@ Item {
         if (ob.trim() === "") return
         if (!force && root.lastSnapBody[id] === ob) return
         root.lastSnapBody[id] = ob
-        runWrite(Model.insertHistorySql(id, root.notes[i].title, ob) + Model.pruneHistorySql(id, Model.HISTORY_KEEP))
+        enqueueIo("db-write", [root.dbPath], {
+          op: "snapshot_history",
+          note_id: id,
+          title: root.notes[i].title,
+          body: ob,
+          keep: Model.HISTORY_KEEP
+        }, false, null)
         return
       }
     }
   }
 
   function loadHistory(id) {
-    runSelect(Model.selectHistorySql(id), function(rows) {
-      libraryManager.historyList = rows
+    enqueueIo("load-history", [root.dbPath, id], null, false, function(res) {
+      libraryManager.historyList = (res && res.history) ? res.history : []
     })
   }
 
@@ -399,28 +425,29 @@ Item {
     root.archivedNotes = root.archivedNotes.slice()
     // Queue the DB update with reload + callback — loadNotes runs AFTER the
     // write flushes, then refreshDetail + loadHistory see the restored content.
-    runWriteReloadCb(Model.updateSql(id, title, body), function() {
+    enqueueIo("db-write", [root.dbPath], { op: "update", id: id, title: title, body: body }, true, null, function() {
       libraryManager.refreshDetail()
       loadHistory(id)
     })
   }
 
   function setNoteColor(id, colorIdx) {
-    runWriteReload(Model.setColorSql(id, colorIdx))
+    enqueueIo("db-write", [root.dbPath], { op: "set_color", id: id, color: colorIdx }, true, null)
   }
 
   function toggleNotePin(id) {
     for (var i = 0; i < root.notes.length; i++) {
       if (root.notes[i].id === id) {
         var nextPin = root.notes[i].pinned === 1 ? 0 : 1
-        runWriteReload(Model.setPinnedSql(id, nextPin))
+        enqueueIo("db-write", [root.dbPath], { op: "set_pinned", id: id, pinned: nextPin }, true, null)
         return
       }
     }
   }
 
   function archiveNote(id, toArchived) {
-    runWriteReload(Model.archiveSql(id, toArchived !== undefined ? toArchived : true))
+    var isArch = (toArchived !== undefined ? toArchived : true) ? 1 : 0
+    enqueueIo("db-write", [root.dbPath], { op: "archive", id: id, archived: isArch }, true, null)
     if (root.activeNoteId === id) root.collapseToFan()
   }
 
@@ -434,12 +461,12 @@ Item {
     // Immediately remove from display and show undo toast
     if (root.activeNoteId === id) root.collapseToFan()
     undoToast.start(target)
-    runWriteReload(Model.deleteSql(id))
+    enqueueIo("db-write", [root.dbPath], { op: "delete", id: id }, true, null)
   }
 
   function restoreDeletedNote(note) {
     if (!note) return
-    runWriteReload(Model.restoreNoteSql(note))
+    enqueueIo("db-write", [root.dbPath], { op: "restore", note: note }, true, null)
   }
 
   function moveNoteUp(id) {
@@ -454,7 +481,7 @@ Item {
       arr[idx - 1] = tmp
       root.activeNotes = arr
       var ids = arr.map(function(n) { return n.id })
-      runWriteReload(Model.reorderNotesSql(ids))
+      enqueueIo("db-write", [root.dbPath], { op: "reorder", ids: ids }, true, null)
     }
   }
 
@@ -470,7 +497,7 @@ Item {
       arr[idx + 1] = tmp
       root.activeNotes = arr
       var ids = arr.map(function(n) { return n.id })
-      runWriteReload(Model.reorderNotesSql(ids))
+      enqueueIo("db-write", [root.dbPath], { op: "reorder", ids: ids }, true, null)
     }
   }
 
@@ -483,79 +510,19 @@ Item {
     arr.splice(boundedTo, 0, item)
     root.activeNotes = arr
     var ids = arr.map(function(n) { return n.id })
-    runWrite(Model.reorderNotesSql(ids))
+    enqueueIo("db-write", [root.dbPath], { op: "reorder", ids: ids }, false, null)
   }
 
   // --------------------------------------------------------- Export & Import
 
-  Process {
-    id: exportImportProc
-    onExited: function(code) {
-      loadNotes()
-    }
-  }
-
-  Process {
-    id: importReadProc
-    stdout: StdioCollector {
-      id: importCollector
-      waitForEnd: true
-      onStreamFinished: {
-        if (importCollector.text) {
-          var imported = Model.parseStickiesJson(importCollector.text)
-          for (var i = 0; i < imported.length; i++) {
-            runWriteReload(Model.insertSql(imported[i].title, imported[i].body, imported[i].color))
-          }
-        }
-      }
-    }
-  }
-
   function exportNotes(format) {
     var exportDir = root.home + "/Documents/Noty-Export"
-    var dateStamp = new Date().toISOString().replace(/[:.]/g, "-")
-
-    if (format === "stickies_json") {
-      var jsonStr = Model.exportStickiesJson(root.notes)
-      var filePath = exportDir + "/Noty-Archive-" + dateStamp + ".stickies"
-      exportImportProc.command = ["bash", "-c", 'mkdir -p -m 700 "$1" && printf "%s" "$2" > "$3" && chmod 600 "$3"', "_", exportDir, jsonStr, filePath]
-      exportImportProc.running = true
-    } else if (format === "single_md") {
-      var mdStr = Model.exportSingleMarkdown(root.notes)
-      var filePath = exportDir + "/All-Notes-" + dateStamp + ".md"
-      exportImportProc.command = ["bash", "-c", 'mkdir -p -m 700 "$1" && printf "%s" "$2" > "$3" && chmod 600 "$3"', "_", exportDir, mdStr, filePath]
-      exportImportProc.running = true
-    } else if (format === "markdown_zip" || format === "text_zip") {
-      var folder = exportDir + "/Notes-" + dateStamp
-      var cmd = ["bash", "-c", 'mkdir -p -m 700 "$1"; shift; while (( $# >= 2 )); do printf "%s" "$2" > "$1" && chmod 600 "$1"; shift 2; done', "_", folder]
-      for (var i = 0; i < root.notes.length; i++) {
-        var n = root.notes[i]
-        var safeTitle = Model.displayTitle(n)
-          .replace(/[^\w\s\d\-_.()]/g, "_")
-          .replace(/^\.+/, "")
-          .trim()
-          .substring(0, 80)
-        if (!safeTitle) safeTitle = "Note-" + n.id
-        var fname = safeTitle + (format === "markdown_zip" ? ".md" : ".txt")
-        var content = format === "markdown_zip" ? Model.tasksToMarkdown(n.body) : n.body
-        cmd.push(folder + "/" + fname, content)
-      }
-      exportImportProc.command = cmd
-      exportImportProc.running = true
-    }
+    enqueueIo("export", [exportDir], { format: format, notes: root.notes }, false, null)
   }
 
   function importNotes() {
-    var script = [
-      'if [ -d "$1" ]; then',
-      '  for f in "$1"/*.stickies; do',
-      '    [ -f "$f" ] && cat "$f" && break',
-      '  done',
-      'fi'
-    ].join("\n")
-
-    importReadProc.command = ["bash", "-c", script, "_", root.home + "/Documents/Noty-Export"]
-    importReadProc.running = true
+    var exportDir = root.home + "/Documents/Noty-Export"
+    enqueueIo("import", [exportDir, root.dbPath], null, true, null)
   }
 
   // ------------------------------------------------------- MULTI-SCREEN DECKS
@@ -950,6 +917,7 @@ Item {
                   Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
 
                   Text {
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     text: "+"
                     color: Qt.rgba(1, 1, 1, 0.90)

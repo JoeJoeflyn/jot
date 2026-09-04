@@ -395,6 +395,7 @@ Item {
       spacing: 8
 
       Text {
+        textFormat: Text.PlainText
         visible: rowItem.iconText !== "" || rowItem.checked
         anchors.verticalCenter: parent.verticalCenter
         text: rowItem.checked ? "✓" : rowItem.iconText
@@ -406,6 +407,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: rowItem.title
         color: rowItem.isDestructive ? "#FEB2B2" : (Color.menu.text || "#FFFFFF")
@@ -417,6 +419,7 @@ Item {
 
       Text {
         id: shortcutLabel
+        textFormat: Text.PlainText
         visible: rowItem.shortcut !== ""
         anchors.verticalCenter: parent.verticalCenter
         text: rowItem.shortcut
@@ -426,6 +429,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: rowItem.hasSubmenu
         anchors.verticalCenter: parent.verticalCenter
         text: "›"

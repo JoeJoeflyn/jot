@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+"""
+scripts/jot-io - Descriptor-safe, bounded IO and SQLite helper for Jot.
+Handles database queries, serialized writes, safe atomic file exports,
+imports, and settings without constructing shell source or following untrusted paths.
+"""
+
+import sys
+import os
+import stat
+import json
+import sqlite3
+import signal
+import time
+import re
+
+# Constants & Bounds
+MAX_PRODUCER_BYTES = 2 * 1024 * 1024     # 2 MB max output cap for stdout
+MAX_TITLE_CHARS    = 200                 # Capped title length
+MAX_BODY_CHARS     = 131072              # 128 KB max body length
+MAX_NOTES_LIMIT    = 500                 # Maximum notes retained/retrieved
+MAX_HISTORY_LIMIT  = 20                  # Maximum history snapshots per note
+MAX_IMPORT_NOTES   = 200                 # Maximum notes imported in one batch
+MAX_IMPORT_BYTES   = 5 * 1024 * 1024     # 5 MB max import file size
+MAX_SETTINGS_BYTES = 64 * 1024           # 64 KB max settings file size
+OPERATION_TIMEOUT  = 8                   # 8-second whole-operation deadline
+
+# Setup process group and deadline
+if hasattr(os, "setpgrp"):
+    try:
+        os.setpgrp()
+    except Exception:
+        pass
+
+def _sig_handler(signum, frame):
+    sys.exit(128 + signum)
+
+try:
+    signal.signal(signal.SIGTERM, _sig_handler)
+    signal.signal(signal.SIGALRM, _sig_handler)
+    signal.alarm(OPERATION_TIMEOUT)
+except Exception:
+    pass
+
+
+def emit_json(obj):
+    """Serialize and output JSON with strict producer byte cap."""
+    raw = json.dumps(obj)
+    raw_bytes = raw.encode("utf-8")
+    if len(raw_bytes) > MAX_PRODUCER_BYTES:
+        err = json.dumps({"status": "error", "message": "Producer byte cap exceeded"}).encode("utf-8")
+        sys.stdout.buffer.write(err + b"\n")
+        sys.stdout.buffer.flush()
+        sys.exit(1)
+    sys.stdout.buffer.write(raw_bytes + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def verify_safe_parent_chain(target_path, allow_create=False, dir_mode=0o700):
+    """
+    Verify that every directory from filesystem root down to the target's
+    parent is owned by current user (or root), is a directory, not a symlink,
+    and not group/world writable.
+    """
+    abs_path = os.path.abspath(target_path)
+    parent_dir = os.path.dirname(abs_path)
+    
+    if allow_create and not os.path.exists(parent_dir):
+        # Create missing components carefully with dir_mode
+        parts = []
+        curr = parent_dir
+        while curr and curr != "/" and not os.path.exists(curr):
+            parts.append(curr)
+            curr = os.path.dirname(curr)
+        for d in reversed(parts):
+            os.mkdir(d, dir_mode)
+            os.chmod(d, dir_mode)
+
+    # Now verify every component in parent_dir
+    curr = "/"
+    components = [c for c in parent_dir.split(os.sep) if c]
+    uid = os.getuid()
+    for part in components:
+        curr = os.path.join(curr, part)
+        try:
+            st = os.lstat(curr)
+        except OSError as e:
+            raise PermissionError(f"Cannot stat directory in path: {curr}: {e}")
+        
+        if stat.S_ISLNK(st.st_mode):
+            raise PermissionError(f"Symlink rejected in parent path: {curr}")
+        if not stat.S_ISDIR(st.st_mode):
+            raise PermissionError(f"Expected directory in path: {curr}")
+        if st.st_uid != uid and st.st_uid != 0:
+            raise PermissionError(f"Directory {curr} owned by untrusted uid {st.st_uid}")
+        if st.st_mode & 0o002:
+            raise PermissionError(f"Directory {curr} is world-writable")
+
+    return parent_dir
+
+
+def safe_open_read(path, max_bytes):
+    """
+    Verify parent chain, open target with O_NOFOLLOW, verify descriptor
+    is a regular file owned by user and under max_bytes, and read bounded bytes.
+    """
+    verify_safe_parent_chain(path, allow_create=False)
+    
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+        
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        raise PermissionError(f"Cannot open {path} (O_NOFOLLOW): {e}")
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PermissionError(f"{path} is not a regular file")
+        if st.st_uid != os.getuid():
+            raise PermissionError(f"{path} is not owned by current user")
+        if st.st_size > max_bytes:
+            raise ValueError(f"{path} size ({st.st_size} bytes) exceeds limit of {max_bytes} bytes")
+            
+        data = bytearray()
+        while len(data) <= max_bytes:
+            chunk = os.read(fd, min(65536, max_bytes - len(data) + 1))
+            if not chunk:
+                break
+            data.extend(chunk)
+            
+        if len(data) > max_bytes:
+            raise ValueError(f"File content exceeds {max_bytes} byte limit")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def safe_atomic_write(dest_path, data_bytes, file_mode=0o600, dir_mode=0o700, max_bytes=MAX_PRODUCER_BYTES):
+    """
+    Safely and atomically write data_bytes to dest_path:
+    - Verifies parent chain
+    - If target exists, verifies it's not a symlink and owned by user
+    - Writes to a temp file in the same directory using O_CREAT | O_EXCL | O_NOFOLLOW
+    - Enforces file_mode (0600)
+    - fsyncs descriptor
+    - Replaces dest_path atomically
+    """
+    if len(data_bytes) > max_bytes:
+        raise ValueError(f"Payload size {len(data_bytes)} exceeds {max_bytes} bytes")
+        
+    parent_dir = verify_safe_parent_chain(dest_path, allow_create=True, dir_mode=dir_mode)
+    
+    # If dest already exists, check that it's not a symlink and owned by user
+    if os.path.lexists(dest_path):
+        st = os.lstat(dest_path)
+        if stat.S_ISLNK(st.st_mode):
+            raise PermissionError(f"Destination {dest_path} is a symlink")
+        if not stat.S_ISREG(st.st_mode):
+            raise PermissionError(f"Destination {dest_path} is not a regular file")
+        if st.st_uid != os.getuid():
+            raise PermissionError(f"Destination {dest_path} not owned by user")
+            
+    temp_name = f".jot-tmp.{os.path.basename(dest_path)}.{os.getpid()}.{time.time_ns()}"
+    temp_path = os.path.join(parent_dir, temp_name)
+    
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+        
+    fd = os.open(temp_path, flags, file_mode)
+    try:
+        os.fchmod(fd, file_mode)
+        total_written = 0
+        while total_written < len(data_bytes):
+            chunk = data_bytes[total_written : total_written + 65536]
+            n = os.write(fd, chunk)
+            if n <= 0:
+                raise IOError("Short write to temporary file")
+            total_written += n
+            
+        os.fsync(fd)
+    except Exception:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+        raise
+    else:
+        os.close(fd)
+        os.replace(temp_path, dest_path)
+
+
+def get_db(db_path):
+    """Verify parent chain, check db permissions, and connect with SQLite."""
+    parent_dir = verify_safe_parent_chain(db_path, allow_create=True, dir_mode=0o700)
+    
+    if os.path.lexists(db_path):
+        st = os.lstat(db_path)
+        if stat.S_ISLNK(st.st_mode):
+            raise PermissionError(f"Database {db_path} is a symlink")
+        if not stat.S_ISREG(st.st_mode):
+            raise PermissionError(f"Database {db_path} is not a regular file")
+        if st.st_uid != os.getuid():
+            raise PermissionError(f"Database {db_path} not owned by user")
+        # Ensure mode 0600
+        try:
+            os.chmod(db_path, 0o600)
+        except Exception:
+            pass
+
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    return conn
+
+
+def normalize_title(t):
+    if t is None:
+        return ""
+    s = str(t).replace("\0", "").strip()
+    return s[:MAX_TITLE_CHARS]
+
+
+def normalize_body(b):
+    if b is None:
+        return ""
+    s = str(b).replace("\0", "")
+    return s[:MAX_BODY_CHARS]
+
+
+def normalize_int(val, default=0, min_val=None, max_val=None):
+    try:
+        n = int(val)
+        if min_val is not None and n < min_val:
+            return min_val
+        if max_val is not None and n > max_val:
+            return max_val
+        return n
+    except (ValueError, TypeError):
+        return default
+
+
+def read_stdin_json():
+    """Read a single line or bounded block of JSON from stdin."""
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    if len(line.encode("utf-8")) > MAX_PRODUCER_BYTES:
+        raise ValueError("Stdin payload exceeds maximum permitted size")
+    return json.loads(line)
+
+
+# =========================================================================
+# Subcommand Handlers
+# =========================================================================
+
+def cmd_init_db(db_path):
+    conn = get_db(db_path)
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                color INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER DEFAULT 0,
+                archived INTEGER DEFAULT 0,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS note_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                saved_at INTEGER NOT NULL
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_archived ON notes(archived, sort_order);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_history_note ON note_history(note_id, saved_at DESC);")
+        
+        # Color migrations
+        conn.execute("UPDATE notes SET color=0 WHERE color='yellow' OR color='lemon';")
+        conn.execute("UPDATE notes SET color=1 WHERE color='peach';")
+        conn.execute("UPDATE notes SET color=2 WHERE color='rose';")
+        conn.execute("UPDATE notes SET color=3 WHERE color='lilac';")
+        conn.execute("UPDATE notes SET color=4 WHERE color='sky';")
+        conn.execute("UPDATE notes SET color=5 WHERE color='mint';")
+        conn.execute("UPDATE notes SET color=6 WHERE color='sand';")
+        conn.execute("UPDATE notes SET color=7 WHERE color='slate';")
+        
+    conn.close()
+    
+    # Ensure mode 0600 on created db
+    if os.path.exists(db_path):
+        try:
+            os.chmod(db_path, 0o600)
+        except Exception:
+            pass
+            
+    emit_json({"status": "ok"})
+
+
+def cmd_read_settings(settings_path):
+    if not os.path.exists(settings_path):
+        emit_json({"status": "ok", "settings": {}})
+        return
+        
+    try:
+        raw_bytes = safe_open_read(settings_path, max_bytes=MAX_SETTINGS_BYTES)
+        data = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+        emit_json({"status": "ok", "settings": data})
+    except Exception as e:
+        emit_json({"status": "error", "message": str(e), "settings": {}})
+
+
+def cmd_write_settings(settings_path):
+    payload = read_stdin_json()
+    if payload is None or not isinstance(payload, dict):
+        emit_json({"status": "error", "message": "Invalid JSON settings payload"})
+        return
+        
+    raw_str = json.dumps(payload, indent=2)
+    safe_atomic_write(settings_path, raw_str.encode("utf-8"), file_mode=0o600, max_bytes=MAX_SETTINGS_BYTES)
+    emit_json({"status": "ok"})
+
+
+def cmd_load_notes(db_path):
+    conn = get_db(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, title, body, color, pinned, archived, sort_order, created_at, updated_at
+        FROM notes
+        ORDER BY pinned DESC, sort_order ASC, id ASC
+        LIMIT ?
+    """, (MAX_NOTES_LIMIT,))
+    
+    rows = []
+    for r in cur.fetchall():
+        rows.append({
+            "id": int(r["id"]),
+            "title": normalize_title(r["title"]),
+            "body": normalize_body(r["body"]),
+            "color": normalize_int(r["color"], 0, 0, 7),
+            "pinned": 1 if r["pinned"] == 1 else 0,
+            "archived": 1 if r["archived"] == 1 else 0,
+            "sort_order": normalize_int(r["sort_order"], 0),
+            "created_at": normalize_int(r["created_at"], 0),
+            "updated_at": normalize_int(r["updated_at"], 0)
+        })
+        
+    # Also fetch latest history bodies to seed lastSnapBody in one atomic pass
+    cur.execute("""
+        SELECT note_id, body FROM note_history WHERE rowid IN (
+            SELECT MAX(rowid) FROM note_history GROUP BY note_id
+        ) LIMIT ?
+    """, (MAX_NOTES_LIMIT,))
+    
+    hist_bodies = {}
+    for hr in cur.fetchall():
+        hist_bodies[str(hr["note_id"])] = normalize_body(hr["body"])
+        
+    conn.close()
+    emit_json({"status": "ok", "notes": rows, "history_bodies": hist_bodies})
+
+
+def cmd_load_history(db_path, note_id_str):
+    note_id = normalize_int(note_id_str, -1)
+    if note_id < 0:
+        emit_json({"status": "ok", "history": []})
+        return
+        
+    conn = get_db(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT rowid AS id, note_id, title, body, saved_at AS created_at, saved_at AS updated_at
+        FROM note_history
+        WHERE note_id = ?
+        ORDER BY saved_at DESC, rowid DESC
+        LIMIT ?
+    """, (note_id, MAX_HISTORY_LIMIT))
+    
+    rows = []
+    for r in cur.fetchall():
+        rows.append({
+            "id": int(r["id"]),
+            "note_id": int(r["note_id"]),
+            "title": normalize_title(r["title"]),
+            "body": normalize_body(r["body"]),
+            "color": 0,
+            "pinned": 0,
+            "archived": 0,
+            "sort_order": 0,
+            "created_at": normalize_int(r["created_at"], 0),
+            "updated_at": normalize_int(r["updated_at"], 0)
+        })
+    conn.close()
+    emit_json({"status": "ok", "history": rows})
+
+
+def cmd_db_write(db_path):
+    req = read_stdin_json()
+    if not req or not isinstance(req, dict):
+        emit_json({"status": "error", "message": "Missing write request payload"})
+        return
+        
+    op = req.get("op", "")
+    now = int(time.time())
+    conn = get_db(db_path)
+    
+    with conn:
+        if op == "insert":
+            title = normalize_title(req.get("title", ""))
+            body = normalize_body(req.get("body", ""))
+            color = normalize_int(req.get("color", 0), 0, 0, 7)
+            cur = conn.execute("""
+                INSERT INTO notes (title, body, color, pinned, archived, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, 0, 0, 0, ?, ?)
+            """, (title, body, color, now, now))
+            emit_json({"status": "ok", "id": cur.lastrowid})
+            return
+            
+        elif op == "update":
+            note_id = normalize_int(req.get("id"), -1)
+            title = normalize_title(req.get("title", ""))
+            body = normalize_body(req.get("body", ""))
+            conn.execute("""
+                UPDATE notes SET title = ?, body = ?, updated_at = ? WHERE id = ?
+            """, (title, body, now, note_id))
+            emit_json({"status": "ok"})
+            return
+            
+        elif op == "set_color":
+            note_id = normalize_int(req.get("id"), -1)
+            color = normalize_int(req.get("color", 0), 0, 0, 7)
+            conn.execute("UPDATE notes SET color = ?, updated_at = ? WHERE id = ?", (color, now, note_id))
+            emit_json({"status": "ok"})
+            return
+            
+        elif op == "set_pinned":
+            note_id = normalize_int(req.get("id"), -1)
+            pinned = 1 if normalize_int(req.get("pinned", 0)) == 1 else 0
+            conn.execute("UPDATE notes SET pinned = ?, updated_at = ? WHERE id = ?", (pinned, now, note_id))
+            emit_json({"status": "ok"})
+            return
+            
+        elif op == "archive":
+            note_id = normalize_int(req.get("id"), -1)
+            archived = 1 if normalize_int(req.get("archived", 1)) == 1 else 0
+            conn.execute("UPDATE notes SET archived = ?, updated_at = ? WHERE id = ?", (archived, now, note_id))
+            emit_json({"status": "ok"})
+            return
+            
+        elif op == "delete":
+            note_id = normalize_int(req.get("id"), -1)
+            conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            conn.execute("DELETE FROM note_history WHERE note_id = ?", (note_id,))
+            emit_json({"status": "ok"})
+            return
+            
+        elif op == "restore":
+            note = req.get("note", {})
+            note_id = normalize_int(note.get("id"), 0)
+            title = normalize_title(note.get("title", ""))
+            body = normalize_body(note.get("body", ""))
+            color = normalize_int(note.get("color", 0), 0, 0, 7)
+            pinned = 1 if note.get("pinned") == 1 else 0
+            archived = 1 if note.get("archived") == 1 else 0
+            created_at = normalize_int(note.get("created_at", now), now)
+            conn.execute("""
+                INSERT INTO notes (id, title, body, color, pinned, archived, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (note_id, title, body, color, pinned, archived, created_at, now))
+            emit_json({"status": "ok"})
+            return
+            
+        elif op == "reorder":
+            ids = req.get("ids", [])
+            if isinstance(ids, list):
+                for idx, nid_val in enumerate(ids[:MAX_NOTES_LIMIT]):
+                    nid = normalize_int(nid_val, -1)
+                    if nid >= 0:
+                        conn.execute("UPDATE notes SET sort_order = ? WHERE id = ?", (idx, nid))
+            emit_json({"status": "ok"})
+            return
+            
+        elif op == "snapshot_history":
+            note_id = normalize_int(req.get("note_id"), -1)
+            title = normalize_title(req.get("title", ""))
+            body = normalize_body(req.get("body", ""))
+            keep = normalize_int(req.get("keep", 10), 10, 1, 50)
+            if note_id >= 0 and body.strip():
+                conn.execute("""
+                    INSERT INTO note_history (note_id, title, body, saved_at)
+                    VALUES (?, ?, ?, ?)
+                """, (note_id, title, body, now))
+                conn.execute("""
+                    DELETE FROM note_history WHERE note_id = ?
+                    AND rowid NOT IN (
+                        SELECT rowid FROM note_history WHERE note_id = ?
+                        ORDER BY rowid DESC LIMIT ?
+                    )
+                """, (note_id, note_id, keep))
+            emit_json({"status": "ok"})
+            return
+            
+        else:
+            emit_json({"status": "error", "message": f"Unknown write operation: {op}"})
+            return
+
+
+def sanitize_filename(name, fallback="Note"):
+    clean = re.sub(r"[^\w\s\d\-_.()]", "_", str(name or "")).strip()
+    clean = re.sub(r"^\.+", "", clean)
+    if not clean:
+        clean = fallback
+    return clean[:80]
+
+
+def cmd_export(export_dir):
+    payload = read_stdin_json()
+    if not payload or not isinstance(payload, dict):
+        emit_json({"status": "error", "message": "Missing export payload"})
+        return
+        
+    fmt = payload.get("format", "stickies_json")
+    notes = payload.get("notes", [])
+    if not isinstance(notes, list):
+        notes = []
+    notes = notes[:MAX_NOTES_LIMIT]
+    
+    # Ensure export directory exists and verify parent chain
+    verify_safe_parent_chain(export_dir, allow_create=True, dir_mode=0o700)
+    
+    timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
+    written_count = 0
+    
+    if fmt == "stickies_json":
+        export_obj = {
+            "version": 1,
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "notes": [
+                {
+                    "title": normalize_title(n.get("title")),
+                    "body": normalize_body(n.get("body")),
+                    "color": normalize_int(n.get("color", 0), 0, 0, 7),
+                    "pinned": n.get("pinned") == 1,
+                    "archived": n.get("archived") == 1,
+                    "created_at": normalize_int(n.get("created_at", 0)),
+                    "updated_at": normalize_int(n.get("updated_at", 0))
+                }
+                for n in notes
+            ]
+        }
+        dest = os.path.join(export_dir, f"Noty-Archive-{timestamp}.stickies")
+        data = json.dumps(export_obj, indent=2).encode("utf-8")
+        safe_atomic_write(dest, data, file_mode=0o600, dir_mode=0o700)
+        written_count = 1
+        
+    elif fmt == "single_md":
+        chunks = []
+        for n in notes:
+            tit = normalize_title(n.get("title")) or "New note"
+            body = normalize_body(n.get("body"))
+            # convert checkboxes
+            body_md = re.sub(r"^(\s*)\[\s*\]\s+", r"\1- [ ] ", body, flags=re.MULTILINE)
+            body_md = re.sub(r"^(\s*)\[[✓xXvV]\]\s+", r"\1- [x] ", body_md, flags=re.MULTILINE)
+            chunks.append(f"## {tit}\n\n{body_md}")
+            
+        full_md = "\n\n---\n\n".join(chunks)
+        dest = os.path.join(export_dir, f"All-Notes-{timestamp}.md")
+        safe_atomic_write(dest, full_md.encode("utf-8"), file_mode=0o600, dir_mode=0o700)
+        written_count = 1
+        
+    elif fmt in ("markdown_zip", "text_zip"):
+        sub_folder = os.path.join(export_dir, f"Notes-{timestamp}")
+        verify_safe_parent_chain(sub_folder, allow_create=True, dir_mode=0o700)
+        ext = ".md" if fmt == "markdown_zip" else ".txt"
+        
+        for idx, n in enumerate(notes):
+            tit = normalize_title(n.get("title"))
+            safe_name = sanitize_filename(tit, fallback=f"Note-{n.get('id', idx+1)}")
+            dest = os.path.join(sub_folder, f"{safe_name}{ext}")
+            body = normalize_body(n.get("body"))
+            if fmt == "markdown_zip":
+                body = re.sub(r"^(\s*)\[\s*\]\s+", r"\1- [ ] ", body, flags=re.MULTILINE)
+                body = re.sub(r"^(\s*)\[[✓xXvV]\]\s+", r"\1- [x] ", body, flags=re.MULTILINE)
+            safe_atomic_write(dest, body.encode("utf-8"), file_mode=0o600, dir_mode=0o700)
+            written_count += 1
+            
+    emit_json({"status": "ok", "files_written": written_count})
+
+
+def cmd_import(export_dir, db_path):
+    verify_safe_parent_chain(export_dir, allow_create=False)
+    if not os.path.isdir(export_dir):
+        emit_json({"status": "error", "message": "Export directory does not exist"})
+        return
+        
+    # Find newest .stickies file
+    stickies_files = []
+    for entry in os.scandir(export_dir):
+        if entry.is_file(follow_symlinks=False) and entry.name.endswith(".stickies"):
+            stickies_files.append((entry.stat(follow_symlinks=False).st_mtime, entry.path))
+            
+    if not stickies_files:
+        emit_json({"status": "error", "message": "No .stickies archive found in export folder"})
+        return
+        
+    stickies_files.sort(key=lambda x: x[0], reverse=True)
+    target_file = stickies_files[0][1]
+    
+    raw_bytes = safe_open_read(target_file, max_bytes=MAX_IMPORT_BYTES)
+    obj = json.loads(raw_bytes.decode("utf-8"))
+    
+    raw_notes = obj.get("notes", []) if isinstance(obj, dict) else (obj if isinstance(obj, list) else [])
+    if not isinstance(raw_notes, list):
+        emit_json({"status": "error", "message": "Malformed stickies payload"})
+        return
+        
+    conn = get_db(db_path)
+    now = int(time.time())
+    imported_count = 0
+    with conn:
+        for n in raw_notes[:MAX_IMPORT_NOTES]:
+            if not isinstance(n, dict):
+                continue
+            title = normalize_title(n.get("title"))
+            body = normalize_body(n.get("body"))
+            color = normalize_int(n.get("color", 0), 0, 0, 7)
+            pinned = 1 if n.get("pinned") else 0
+            archived = 1 if n.get("archived") else 0
+            conn.execute("""
+                INSERT INTO notes (title, body, color, pinned, archived, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+            """, (title, body, color, pinned, archived, now, now))
+            imported_count += 1
+            
+    conn.close()
+    emit_json({"status": "ok", "imported_count": imported_count})
+
+
+def main():
+    if len(sys.argv) < 2:
+        emit_json({"status": "error", "message": "No subcommand specified"})
+        sys.exit(1)
+        
+    cmd = sys.argv[1]
+    try:
+        if cmd == "init-db":
+            cmd_init_db(sys.argv[2])
+        elif cmd == "read-settings":
+            cmd_read_settings(sys.argv[2])
+        elif cmd == "write-settings":
+            cmd_write_settings(sys.argv[2])
+        elif cmd == "load-notes":
+            cmd_load_notes(sys.argv[2])
+        elif cmd == "load-history":
+            cmd_load_history(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "-1")
+        elif cmd == "db-write":
+            cmd_db_write(sys.argv[2])
+        elif cmd == "export":
+            cmd_export(sys.argv[2])
+        elif cmd == "import":
+            cmd_import(sys.argv[2], sys.argv[3])
+        else:
+            emit_json({"status": "error", "message": f"Unknown command {cmd}"})
+            sys.exit(1)
+    except Exception as e:
+        emit_json({"status": "error", "message": str(e)})
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

@@ -127,6 +127,7 @@ Item {
         spacing: 1
 
         Text {
+          textFormat: Text.PlainText
           text: "Note deleted"
           color: "#FFFFFF"
           font.family: Style.font.family
@@ -135,6 +136,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           text: toast.pendingNote ? Model.displayTitle(toast.pendingNote) : ""
           color: Qt.rgba(1, 1, 1, 0.65)
           font.family: Style.font.family
@@ -155,6 +157,7 @@ Item {
 
         Text {
           id: undoLabel
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           text: "Undo"
           color: "#FFFFFF"
