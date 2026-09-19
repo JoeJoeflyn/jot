@@ -36,9 +36,18 @@ BarWidget {
         height: Style.bar.iconCanvas
 
         Canvas {
+          id: iconCanvas
           anchors.fill: parent
           anchors.margins: 2
           renderTarget: Canvas.FramebufferObject
+
+          // Re-paint whenever the active theme's palette changes, since the
+          // canvas only reads these colors inside onPaint and wouldn't
+          // otherwise notice a live theme switch.
+          property color sheetColor: button.foreground
+          property color shadeColor: Color.accent
+          onSheetColorChanged: requestPaint()
+          onShadeColorChanged: requestPaint()
 
           onPaint: {
             var ctx = getContext("2d")
@@ -48,8 +57,9 @@ BarWidget {
             var fold = 5
             var rad = 2
 
-            // Note Sheet outline with folded top-right corner
-            ctx.fillStyle = Qt.rgba(1, 1, 1, 0.85)
+            // Note Sheet outline with folded top-right corner, tinted with
+            // the bar's current theme foreground so it matches other icons.
+            ctx.fillStyle = Qt.rgba(sheetColor.r, sheetColor.g, sheetColor.b, 0.85)
             ctx.beginPath()
             ctx.moveTo(rad, 0)
             ctx.lineTo(w - fold, 0)
@@ -63,8 +73,10 @@ BarWidget {
             ctx.closePath()
             ctx.fill()
 
-            // Fold flap
-            ctx.fillStyle = Qt.rgba(0, 0, 0, 0.28)
+            // Fold flap and rule lines pick up the theme's accent color, so
+            // the icon reads as themed rather than assuming a light sheet
+            // with a black shadow.
+            ctx.fillStyle = Qt.rgba(shadeColor.r, shadeColor.g, shadeColor.b, 0.55)
             ctx.beginPath()
             ctx.moveTo(w - fold, 0)
             ctx.lineTo(w, fold)
@@ -73,7 +85,7 @@ BarWidget {
             ctx.fill()
 
             // 2 Note rule lines
-            ctx.fillStyle = Qt.rgba(0, 0, 0, 0.35)
+            ctx.fillStyle = Qt.rgba(shadeColor.r, shadeColor.g, shadeColor.b, 0.55)
             ctx.fillRect(3, 7, w - 6, 1.5)
             ctx.fillRect(3, 10, w - 8, 1.5)
           }
